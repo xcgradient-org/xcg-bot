@@ -26,13 +26,17 @@ ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
 class Settings:
     discord_token: str
     notion_token: str
-    anthropic_api_key: str
+    discord_user_id_oriol: int
+    discord_user_id_arnau: int
+    discord_user_id_adam: int
     notion_tasks_db_id: str
     notion_daily_logs_db_id: str
     notion_streaks_db_id: str
     notion_meetings_db_id: str
     discord_blockers_channel_id: int
     discord_announcements_channel_id: int
+    ollama_base_url: str
+    ollama_model: str
 
 
 def configure_logging() -> None:
@@ -55,13 +59,19 @@ def load_settings() -> Settings:
     if env_path is None:
         raise RuntimeError("No .env file found at automation/.env.")
 
+    notion_tasks_db_id = os.getenv("NOTION_TASKS_DB_ID", "").strip() or os.getenv("NOTION_TASKS_DB", "").strip()
+    notion_daily_logs_db_id = os.getenv("NOTION_DAILY_LOGS_DB_ID", "").strip() or os.getenv("NOTION_DAILY_LOGS_DB", "").strip()
+    notion_streaks_db_id = os.getenv("NOTION_STREAKS_DB_ID", "").strip() or os.getenv("NOTION_STREAKS_DB", "").strip()
+
     required = {
         "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN", "").strip(),
         "NOTION_TOKEN": os.getenv("NOTION_TOKEN", "").strip(),
-        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        "NOTION_TASKS_DB_ID": os.getenv("NOTION_TASKS_DB_ID", "").strip(),
-        "NOTION_DAILY_LOGS_DB_ID": os.getenv("NOTION_DAILY_LOGS_DB_ID", "").strip(),
-        "NOTION_STREAKS_DB_ID": os.getenv("NOTION_STREAKS_DB_ID", "").strip(),
+        "DISCORD_USER_ID_ORIOL": os.getenv("DISCORD_USER_ID_ORIOL", "").strip(),
+        "DISCORD_USER_ID_ARNAU": os.getenv("DISCORD_USER_ID_ARNAU", "").strip(),
+        "DISCORD_USER_ID_ADAM": os.getenv("DISCORD_USER_ID_ADAM", "").strip(),
+        "NOTION_TASKS_DB_ID": notion_tasks_db_id,
+        "NOTION_DAILY_LOGS_DB_ID": notion_daily_logs_db_id,
+        "NOTION_STREAKS_DB_ID": notion_streaks_db_id,
         "NOTION_MEETINGS_DB_ID": os.getenv("NOTION_MEETINGS_DB_ID", "").strip(),
         "DISCORD_BLOCKERS_CHANNEL_ID": os.getenv("DISCORD_BLOCKERS_CHANNEL_ID", "").strip(),
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": os.getenv("DISCORD_ANNOUNCEMENTS_CHANNEL_ID", "").strip(),
@@ -76,13 +86,17 @@ def load_settings() -> Settings:
     return Settings(
         discord_token=required["DISCORD_TOKEN"],
         notion_token=required["NOTION_TOKEN"],
-        anthropic_api_key=required["ANTHROPIC_API_KEY"],
+        discord_user_id_oriol=int(required["DISCORD_USER_ID_ORIOL"]),
+        discord_user_id_arnau=int(required["DISCORD_USER_ID_ARNAU"]),
+        discord_user_id_adam=int(required["DISCORD_USER_ID_ADAM"]),
         notion_tasks_db_id=required["NOTION_TASKS_DB_ID"],
         notion_daily_logs_db_id=required["NOTION_DAILY_LOGS_DB_ID"],
         notion_streaks_db_id=required["NOTION_STREAKS_DB_ID"],
         notion_meetings_db_id=required["NOTION_MEETINGS_DB_ID"],
         discord_blockers_channel_id=int(required["DISCORD_BLOCKERS_CHANNEL_ID"]),
         discord_announcements_channel_id=int(required["DISCORD_ANNOUNCEMENTS_CHANNEL_ID"]),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434",
+        ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:32b").strip() or "qwen2.5:32b",
     )
 
 
@@ -160,8 +174,9 @@ def main() -> None:
     notion.client.databases.retrieve(database_id=settings.notion_meetings_db_id)
     LOGGER.info("Startup checks passed: Notion databases are reachable.")
 
-    reflection = ReflectionService(api_key=settings.anthropic_api_key)
-    LOGGER.info("Anthropic client initialized.")
+    reflection = ReflectionService(model=settings.ollama_model, base_url=settings.ollama_base_url)
+    reflection.verify_startup()
+    LOGGER.info("Ollama client initialized with model %s at %s.", settings.ollama_model, settings.ollama_base_url)
 
     bot = XCGradientOSBot(settings=settings, notion=notion, reflection=reflection)
     bot.run(settings.discord_token, log_handler=None)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 
@@ -32,21 +31,6 @@ SYSTEM_PROMPT = (
     "type, attendees (array), location, notes_enhanced (1-3 sentences, clean and professional, empty string if no notes provided). "
     "Return only valid JSON, no markdown, no preamble."
 )
-MODEL = "claude-sonnet-4-20250514"
-
-
-def _parse_json(text: str) -> dict:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.startswith("json"):
-            cleaned = cleaned[4:].strip()
-    return json.loads(cleaned)
-
-
-def _extract_text(response) -> str:
-    parts = [block.text for block in response.content if getattr(block, "type", "") == "text" and getattr(block, "text", "").strip()]
-    return "\n".join(parts).strip()
 
 
 def _normalize_attendees(value: str) -> list[str]:
@@ -186,25 +170,18 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
 
         ai_payload = None
         try:
-            response = self.reflection.client.messages.create(
-                model=MODEL,
-                max_tokens=400,
-                system=SYSTEM_PROMPT,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Title: {raw_input['title']}\n"
-                            f"Date: {raw_input['date_input']}\n"
-                            f"Type: {raw_input['type']}\n"
-                            f"Attendees: {raw_input['attendees']}\n"
-                            f"Location: {raw_input['location']}\n"
-                            f"Notes: {raw_input['notes'].strip() or 'none'}"
-                        ),
-                    }
-                ],
+            ai_payload = self.reflection.generate_json_response(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=(
+                    f"Title: {raw_input['title']}\n"
+                    f"Date: {raw_input['date_input']}\n"
+                    f"Type: {raw_input['type']}\n"
+                    f"Attendees: {raw_input['attendees']}\n"
+                    f"Location: {raw_input['location']}\n"
+                    f"Notes: {raw_input['notes'].strip() or 'none'}"
+                ),
+                max_output_tokens=400,
             )
-            ai_payload = _parse_json(_extract_text(response))
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Meeting AI enhancement failed; falling back to raw input: %s", exc)
 

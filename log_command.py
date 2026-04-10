@@ -16,17 +16,6 @@ from streaks import MADRID_TZ, compute_updated_streak
 LOGGER = logging.getLogger("xcg_bot.log_command")
 BLOCKER_RE = re.compile(r"^\s*@(?P<role>CEO|CTO|COO)\s*-\s*(?P<description>.+?)\s*$", re.IGNORECASE | re.DOTALL)
 
-# Replace these placeholders with the founders' real Discord user IDs.
-DISCORD_USER_ID_ORIOL = 100000000000000001
-DISCORD_USER_ID_ARNAU = 100000000000000002
-DISCORD_USER_ID_ADAM = 100000000000000003
-
-FOUNDERS = {
-    DISCORD_USER_ID_ORIOL: {"name": "Oriol", "role": "CEO"},
-    DISCORD_USER_ID_ARNAU: {"name": "Arnau", "role": "CTO"},
-    DISCORD_USER_ID_ADAM: {"name": "Adam", "role": "COO"},
-}
-
 
 @dataclass(frozen=True, slots=True)
 class LogContext:
@@ -45,6 +34,14 @@ def current_context() -> LogContext:
 
 def build_blocker_message(founder_name: str, target_role: str, description: str) -> str:
     return f"🚨 **{founder_name}** has a blocker for **@{target_role.upper()}**: {description}"
+
+
+def founder_mapping(settings) -> dict[int, dict[str, str]]:
+    return {
+        settings.discord_user_id_oriol: {"name": "Oriol", "role": "CEO"},
+        settings.discord_user_id_arnau: {"name": "Arnau", "role": "CTO"},
+        settings.discord_user_id_adam: {"name": "Adam", "role": "COO"},
+    }
 
 
 async def wait_for_follow_up(bot: discord.Client, *, channel_id: int, user_id: int, timeout: float = 60.0) -> discord.Message:
@@ -116,10 +113,10 @@ class LogModal(discord.ui.Modal, title="XC Gradient EOD Log"):
         self.settings = settings
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        founder = FOUNDERS.get(interaction.user.id)
+        founder = founder_mapping(self.settings).get(interaction.user.id)
         if founder is None:
             await interaction.response.send_message(
-                "Your Discord user ID is not in the FOUNDERS mapping yet.",
+                "Your Discord user ID is not configured in automation/.env yet.",
                 ephemeral=True,
             )
             return
