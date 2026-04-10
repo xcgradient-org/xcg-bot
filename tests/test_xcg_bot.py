@@ -60,13 +60,13 @@ class ReflectionServiceTests(unittest.TestCase):
 
     def test_verify_startup_accepts_installed_model(self) -> None:
         service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_post_json", return_value={"models": [{"name": "qwen2.5:32b"}]}) as post_json:
+        with patch.object(service, "_get_json", return_value={"models": [{"name": "qwen2.5:32b"}]}) as get_json:
             service.verify_startup()
-        post_json.assert_called_once_with("/api/tags", {})
+        get_json.assert_called_once_with("/api/tags")
 
     def test_verify_startup_raises_if_model_missing(self) -> None:
         service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_post_json", return_value={"models": [{"name": "llama3.1:8b"}]}):
+        with patch.object(service, "_get_json", return_value={"models": [{"name": "llama3.1:8b"}]}):
             with self.assertRaisesRegex(RuntimeError, "not installed"):
                 service.verify_startup()
 
@@ -144,12 +144,35 @@ class MeetingCommandTests(unittest.TestCase):
         attendees = meeting_command._normalize_attendees("CEO / CTO, COO")
         self.assertEqual(attendees, ["CEO", "CTO", "COO"])
 
+    def test_attendee_choice_all_maps_to_all_founders(self) -> None:
+        self.assertEqual(meeting_command.ATTENDEE_CHOICES[0].value, "CEO, CTO, COO")
+
+    def test_parse_user_datetime_uses_strict_madrid_format(self) -> None:
+        date_iso = meeting_command._parse_user_datetime("2026-04-17 11:00", default_year=2026)
+        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
+
+    def test_parse_user_datetime_accepts_month_day_without_year(self) -> None:
+        date_iso = meeting_command._parse_user_datetime("04-17 11:00", default_year=2026)
+        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
+
+    def test_parse_user_datetime_uses_llm_fallback(self) -> None:
+        reflection_service = MagicMock()
+        reflection_service.generate_json_response.return_value = {"date_iso": "2026-04-17T11:00:00+02:00"}
+        date_iso = meeting_command._parse_user_datetime(
+            "Friday 17 April at 11",
+            reflection=reflection_service,
+            default_year=2026,
+        )
+        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
+        reflection_service.generate_json_response.assert_called_once()
+
     def test_normalize_payload_falls_back_to_raw_input(self) -> None:
         raw_input = {
             "title": "Weekly Sync",
-            "date_input": "Mon Apr 14 2026 10:00",
+            "date_input": "2026-04-14 10:00",
+            "date_iso": "2026-04-14T10:00:00+02:00",
             "type": "Weekly Sync",
-            "attendees": "CEO / CTO / COO",
+            "attendees": "CEO, CTO, COO",
             "location": "Meet room",
             "notes": "Discuss blockers",
         }
@@ -171,6 +194,7 @@ class MeetingCommandTests(unittest.TestCase):
         message = meeting_command._build_confirmation(payload)
         self.assertIn("Client — Tuesday 14 April, 10:00", message)
         self.assertNotIn("📝", message)
+        self.assertIn("Posted in #announcements.", message)
 
 
 class MeetingsFormattingTests(unittest.TestCase):
@@ -200,6 +224,37 @@ class NotionServiceTests(unittest.TestCase):
         self.assertTrue(service._is_task_done(checkbox_page))
         self.assertTrue(service._is_task_done(status_page))
         self.assertTrue(service._is_task_done(select_page))
+
+    def test_query_all_uses_data_source_query_when_database_query_missing(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service.client = MagicMock()
+        del service.client.databases.query
+        service.client.databases.retrieve.return_value = {
+            "data_sources": [{"id": "source-123"}],
+        }
+        service.client.data_sources.query.return_value = {
+            "results": [{"id": "page-1"}],
+            "has_more": False,
+            "next_cursor": None,
+        }
+
+        result = service._query_all("db-123")
+
+        self.assertEqual(result, [{"id": "page-1"}])
+        service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
+        service.client.data_sources.query.assert_called_once_with(data_source_id="source-123", page_size=100)
+
+    def test_primary_data_source_id_returns_first_source(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service.client = MagicMock()
+        service.client.databases.retrieve.return_value = {
+            "data_sources": [{"id": "source-123"}, {"id": "source-456"}],
+        }
+
+        result = service.primary_data_source_id("db-123")
+
+        self.assertEqual(result, "source-123")
+        service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
 
     def test_create_daily_log_builds_expected_properties(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")

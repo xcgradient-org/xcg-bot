@@ -141,14 +141,34 @@ class NotionService:
     def founder_name(self, row: dict[str, Any]) -> str:
         return self._property_text(row, "Founder")
 
+    def primary_data_source_id(self, database_id: str) -> str:
+        database = self.client.databases.retrieve(database_id=database_id)
+        source_list = database.get("data_sources", [])
+        if not source_list:
+            raise RuntimeError(f"Database {database_id} does not expose any data sources.")
+        return source_list[0]["id"]
+
     def _query_all(self, database_id: str) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         next_cursor: str | None = None
+        query_fn = getattr(self.client.databases, "query", None)
+        query_kwargs_name = "database_id"
+
+        if query_fn is None:
+            data_sources = getattr(self.client, "data_sources", None)
+            data_source_query = getattr(data_sources, "query", None) if data_sources is not None else None
+            if data_source_query is None:
+                raise RuntimeError("Installed notion-client does not support querying databases or data sources.")
+
+            query_fn = data_source_query
+            query_kwargs_name = "data_source_id"
+            database_id = self.primary_data_source_id(database_id)
+
         while True:
             payload: dict[str, Any] = {"page_size": 100}
             if next_cursor:
                 payload["start_cursor"] = next_cursor
-            response = self.client.databases.query(database_id=database_id, **payload)
+            response = query_fn(**{query_kwargs_name: database_id}, **payload)
             results.extend(response.get("results", []))
             if not response.get("has_more"):
                 return results

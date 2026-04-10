@@ -20,6 +20,21 @@ class ReflectionService:
         self.model = model
         self.base_url = base_url.rstrip("/")
 
+    def _get_json(self, path: str) -> dict:
+        req = request.Request(
+            f"{self.base_url}{path}",
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        try:
+            with request.urlopen(req, timeout=120) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Ollama request failed: {exc.code} {body}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
     def _post_json(self, path: str, payload: dict) -> dict:
         req = request.Request(
             f"{self.base_url}{path}",
@@ -37,7 +52,7 @@ class ReflectionService:
             raise RuntimeError(f"Ollama request failed: {exc}") from exc
 
     def verify_startup(self) -> None:
-        payload = self._post_json("/api/tags", {})
+        payload = self._get_json("/api/tags")
         models = {item.get("name", "").strip() for item in payload.get("models", [])}
         if self.model not in models:
             raise RuntimeError(
