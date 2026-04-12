@@ -9,9 +9,11 @@ LOGGER = logging.getLogger("xcg_bot.reflection")
 DEFAULT_MODEL = "qwen2.5:32b"
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
 SYSTEM_PROMPT = (
-    "You are an EOD reflection assistant for a B2B SaaS startup. "
-    "Write a concise, honest 3-5 sentence reflection in first person based on the completed tasks and notes provided. "
-    "Be direct, no fluff."
+    "You are an EOD writing assistant for a B2B SaaS startup. "
+    "Write a concise formal daily note in first person based on the completed tasks and notes provided. "
+    "Use plain professional language, keep it specific, and avoid inflated or introspective wording. "
+    "Return only the note body as a short paragraph or two. "
+    "Do not add a title, heading, date line, greeting, sign-off, name, or role."
 )
 
 
@@ -99,7 +101,7 @@ class ReflectionService:
         user_prompt = (
             f"Founder: {founder_name} | Role: {founder_role} | Date: {today_iso}\n"
             f"Completed tasks: {task_text}\n"
-            f"Raw notes: {notes_text}"
+            f"Notes: {notes_text}"
         )
 
         payload = self._request(

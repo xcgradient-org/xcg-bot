@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 
 import discord
 import pytz
@@ -27,20 +28,26 @@ MONTHS = [
     "December",
 ]
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+WEEKDAY_LOOKUP = {day.lower(): index for index, day in enumerate(WEEKDAYS)}
+TIME_RE = re.compile(r"(?:(?:at)\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?$", re.IGNORECASE)
 SYSTEM_PROMPT = (
-    "You are a meeting assistant for a B2B SaaS startup. Given raw meeting details, "
-    "return a JSON object with these exact keys: title, date_iso (ISO 8601 with timezone Europe/Madrid), "
-    "type, attendees (array), location, notes_enhanced (1-3 sentences, clean and professional, empty string if no notes provided). "
+    "You are a meeting assistant for a B2B SaaS startup. "
+    "Given raw meeting details, return a JSON object with these exact keys: "
+    "title (polished, concise), "
+    "date_iso (ISO 8601 datetime with timezone offset for Europe/Madrid — parse the date string intelligently, "
+    "resolving relative expressions like 'tomorrow', 'friday', 'next monday 10:00', or short formats like "
+    "'04-17 10:00' using the provided today's date; default time to 10:00 if not specified), "
+    "type, attendees (array of strings), location, "
+    "notes_enhanced (1-3 sentences, clean and professional, empty string if no notes provided). "
     "Return only valid JSON, no markdown, no preamble."
 )
-DATE_PARSE_SYSTEM_PROMPT = (
-    "You parse meeting date strings for a Discord bot. "
-    "Return a JSON object with the exact key `date_iso` containing an ISO 8601 datetime in timezone Europe/Madrid. "
-    "Preserve the user's intended numeric month, day, and time. "
-    "If the year is omitted, assume the provided default year. "
-    "If weekday words conflict with the numeric date, trust the numeric date. "
-    "Return only valid JSON."
-)
+
+_ROLE_TO_SETTING = {
+    "CEO": "discord_user_id_oriol",
+    "CTO": "discord_user_id_arnau",
+    "COO": "discord_user_id_adam",
+}
+
 TYPE_CHOICES = [
     app_commands.Choice(name="Weekly Sync", value="Weekly Sync"),
     app_commands.Choice(name="Client", value="Client"),
@@ -52,11 +59,45 @@ ATTENDEE_CHOICES = [
     app_commands.Choice(name="CEO", value="CEO"),
     app_commands.Choice(name="CTO", value="CTO"),
     app_commands.Choice(name="COO", value="COO"),
-    app_commands.Choice(name="CEO + CTO", value="CEO, CTO"),
-    app_commands.Choice(name="CEO + COO", value="CEO, COO"),
-    app_commands.Choice(name="CTO + COO", value="CTO, COO"),
-    app_commands.Choice(name="CEO + CTO + COO", value="CEO, CTO, COO"),
+    app_commands.Choice(name="CEO+CTO", value="CEO, CTO"),
+    app_commands.Choice(name="CEO+COO", value="CEO, COO"),
+    app_commands.Choice(name="CTO+COO", value="CTO, COO"),
+    app_commands.Choice(name="CEO+CTO+COO", value="CEO, CTO, COO"),
 ]
+LOCATION_CHOICES = [
+    app_commands.Choice(name="Discord War Room", value="Discord War Room"),
+    app_commands.Choice(name="Discord Deep Work", value="Discord Deep Work"),
+    app_commands.Choice(name="Google Meet", value="Google Meet"),
+    app_commands.Choice(name="In Person", value="In Person"),
+    app_commands.Choice(name="Other", value="Other"),
+]
+
+
+def _build_mentions(attendees: list[str], settings) -> str:
+    seen: set[str] = set()
+    parts = []
+    for role in attendees:
+        attr = _ROLE_TO_SETTING.get(role.upper())
+        if attr and attr not in seen:
+            seen.add(attr)
+            user_id = getattr(settings, attr, None)
+            if user_id:
+                parts.append(f"<@{user_id}>")
+    return " ".join(parts)
+
+
+def _title_suggestion(meeting_type: str) -> str:
+    now = datetime.now(MADRID_TZ)
+    iso_year, iso_week, _ = now.isocalendar()
+    week_code = f"{iso_year % 100:02d}-W{iso_week:02d}"
+    if meeting_type == "Weekly Sync":
+        return f"Weekly Sync · {week_code}"
+    if meeting_type == "Client":
+        return "Client Meeting"
+    if meeting_type == "Investor":
+        return "Investor Meeting"
+    return "Meeting"
+
 
 def _normalize_attendees(value: str) -> list[str]:
     if not value.strip():
@@ -77,10 +118,66 @@ def _normalize_date_iso(value: str) -> str:
     return parsed.isoformat()
 
 
-def _try_parse_user_datetime(raw_value: str, *, default_year: int) -> str | None:
+def _try_parse_relative_datetime(raw_value: str, *, base_now: datetime) -> str | None:
+    value = " ".join(raw_value.strip().lower().split())
+    if not value:
+        return None
+
+    minute = 0
+    hour = 10
+    matched_time = TIME_RE.search(value)
+    if matched_time:
+        hour = int(matched_time.group("hour"))
+        minute = int(matched_time.group("minute") or "0")
+        value = value[: matched_time.start()].strip()
+        if value.endswith("at"):
+            value = value[:-2].strip()
+
+    target_date = None
+    if value in {"today", "tod"}:
+        target_date = base_now.date()
+    elif value == "tomorrow":
+        target_date = base_now.date() + timedelta(days=1)
+    else:
+        prefix = ""
+        weekday_text = value
+        if value.startswith("this "):
+            prefix = "this"
+            weekday_text = value[5:].strip()
+        elif value.startswith("next "):
+            prefix = "next"
+            weekday_text = value[5:].strip()
+
+        target_weekday = WEEKDAY_LOOKUP.get(weekday_text)
+        if target_weekday is not None:
+            days_ahead = (target_weekday - base_now.weekday()) % 7
+            if prefix == "next":
+                days_ahead = 7 if days_ahead == 0 else days_ahead + 7
+            elif days_ahead == 0:
+                days_ahead = 7
+            target_date = base_now.date() + timedelta(days=days_ahead)
+
+    if target_date is None:
+        return None
+
+    parsed = datetime(target_date.year, target_date.month, target_date.day, hour, minute)
+    return MADRID_TZ.localize(parsed).isoformat()
+
+
+def _try_parse_user_datetime(raw_value: str, *, default_year: int, base_now: datetime | None = None) -> str | None:
     value = raw_value.strip()
     if not value:
         return None
+
+    current = base_now or datetime.now(MADRID_TZ)
+    if current.tzinfo is None:
+        current = MADRID_TZ.localize(current)
+    else:
+        current = current.astimezone(MADRID_TZ)
+
+    relative = _try_parse_relative_datetime(value, base_now=current)
+    if relative:
+        return relative
 
     patterns_with_year = (
         "%Y-%m-%d %H:%M",
@@ -115,54 +212,42 @@ def _try_parse_user_datetime(raw_value: str, *, default_year: int) -> str | None
     return None
 
 
-def _parse_user_datetime(raw_value: str, *, reflection=None, default_year: int | None = None) -> str:
-    year = default_year or datetime.now(MADRID_TZ).year
-    parsed = _try_parse_user_datetime(raw_value, default_year=year)
-    if parsed:
-        return parsed
-
-    if reflection is not None:
-        payload = reflection.generate_json_response(
-            system_prompt=DATE_PARSE_SYSTEM_PROMPT,
-            user_prompt=(
-                f"Default year: {year}\n"
-                f"Input: {raw_value.strip()}"
-            ),
-            max_output_tokens=120,
-        )
-        date_iso = str(payload.get("date_iso") or "").strip()
-        if date_iso:
-            try:
-                return _normalize_date_iso(date_iso)
-            except ValueError:
-                pass
-
-    raise ValueError(
-        "I couldn't parse that date. Try `2026-04-17 11:00` or `04-17 11:00` in Europe/Madrid."
-    )
-
-
 def _normalize_payload(raw_input: dict, ai_payload: dict | None) -> dict:
+    now = datetime.now(MADRID_TZ)
+    year = now.year
+
     if not ai_payload:
+        date_iso = _try_parse_user_datetime(raw_input["date_input"], default_year=year, base_now=now) or raw_input["date_input"]
         return {
             "title": raw_input["title"].strip(),
-            "date_iso": raw_input["date_iso"].strip(),
+            "date_iso": date_iso,
             "type": raw_input["type"].strip(),
             "attendees": _normalize_attendees(raw_input["attendees"]),
             "location": raw_input["location"].strip(),
             "notes_enhanced": raw_input["notes"].strip(),
         }
 
-    attendees = ai_payload.get("attendees")
-    normalized_attendees = []
-    if isinstance(attendees, list):
-        normalized_attendees = [str(item).strip() for item in attendees if str(item).strip()]
+    # Use LLM-parsed date_iso; fall back to strptime if invalid
+    ai_date_raw = str(ai_payload.get("date_iso") or "").strip()
+    if ai_date_raw:
+        try:
+            date_iso = _normalize_date_iso(ai_date_raw)
+        except (ValueError, Exception):  # noqa: BLE001
+            date_iso = _try_parse_user_datetime(raw_input["date_input"], default_year=year, base_now=now) or raw_input["date_input"]
+    else:
+        date_iso = _try_parse_user_datetime(raw_input["date_input"], default_year=year, base_now=now) or raw_input["date_input"]
+
+    ai_attendees = ai_payload.get("attendees")
+    if isinstance(ai_attendees, list):
+        normalized_attendees = [str(a).strip() for a in ai_attendees if str(a).strip()]
+    else:
+        normalized_attendees = _normalize_attendees(raw_input["attendees"])
 
     return {
         "title": str(ai_payload.get("title") or raw_input["title"]).strip(),
-        "date_iso": raw_input["date_iso"].strip(),
+        "date_iso": date_iso,
         "type": raw_input["type"].strip(),
-        "attendees": _normalize_attendees(raw_input["attendees"]),
+        "attendees": normalized_attendees,
         "location": raw_input["location"].strip(),
         "notes_enhanced": str(ai_payload.get("notes_enhanced") or "").strip(),
     }
@@ -183,12 +268,7 @@ def _build_confirmation(payload: dict) -> str:
     ]
     if payload["notes_enhanced"]:
         lines.append(f"📝 {payload['notes_enhanced']}")
-    lines.extend(
-        [
-            "",
-            "Posted in #announcements.",
-        ]
-    )
+    lines.extend(["", "Posted in #announcements."])
     return "\n".join(lines)
 
 
@@ -197,14 +277,8 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
     date_input = discord.ui.TextInput(
         label="Date and Time",
         required=True,
-        placeholder="2026-04-17 11:00",
+        placeholder="e.g. 04-17 10:00 or tomorrow 10:00 or friday 10:00",
         max_length=120,
-    )
-    location_input = discord.ui.TextInput(
-        label="Location",
-        required=True,
-        placeholder="URL or physical location",
-        max_length=250,
     )
     notes_input = discord.ui.TextInput(
         label="Notes",
@@ -214,41 +288,36 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
         max_length=2000,
     )
 
-    def __init__(self, notion, reflection, settings, *, meeting_type: str, attendees_value: str) -> None:
+    def __init__(
+        self,
+        notion,
+        reflection,
+        settings,
+        *,
+        meeting_type: str,
+        attendees_value: str,
+        location: str,
+    ) -> None:
         super().__init__(timeout=300)
         self.notion = notion
         self.reflection = reflection
         self.settings = settings
         self.meeting_type = meeting_type
         self.attendees_value = attendees_value
+        self.location = location
+        self.title_input.default = _title_suggestion(meeting_type)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
 
-        try:
-            date_iso = _parse_user_datetime(
-                str(self.date_input.value),
-                reflection=self.reflection,
-                default_year=datetime.now(MADRID_TZ).year,
-            )
-        except ValueError as exc:
-            await interaction.followup.send(str(exc), ephemeral=True)
-            return
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Meeting date parsing failed: %s", exc)
-            await interaction.followup.send(
-                "I couldn't parse that date. Try `2026-04-17 11:00` or `04-17 11:00`.",
-                ephemeral=True,
-            )
-            return
-
+        now = datetime.now(MADRID_TZ)
+        today_iso = now.date().isoformat()
         raw_input = {
             "title": str(self.title_input.value),
             "date_input": str(self.date_input.value),
-            "date_iso": date_iso,
             "type": self.meeting_type,
             "attendees": self.attendees_value,
-            "location": str(self.location_input.value),
+            "location": self.location,
             "notes": str(self.notes_input.value or ""),
         }
 
@@ -257,6 +326,7 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
             ai_payload = self.reflection.generate_json_response(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=(
+                    f"Today is: {WEEKDAYS[now.weekday()]} {today_iso}\n"
                     f"Title: {raw_input['title']}\n"
                     f"Date: {raw_input['date_input']}\n"
                     f"Type: {raw_input['type']}\n"
@@ -294,7 +364,9 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
             return
 
         try:
-            content = _format_message("📅 @everyone New meeting scheduled!", created_page)
+            mentions = _build_mentions(payload["attendees"], self.settings)
+            prefix = f"📅 {mentions} New meeting scheduled!" if mentions else "📅 New meeting scheduled!"
+            content = _format_message(prefix, created_page)
             await _send_announcement(interaction.client, self.settings.discord_announcements_channel_id, content)
             self.notion.client.pages.update(
                 page_id=created_page["id"],
@@ -317,15 +389,18 @@ def register_meeting_command(tree: app_commands.CommandTree, notion, reflection,
     @app_commands.describe(
         meeting_type="Meeting type",
         attendees="Who should attend",
+        location="Meeting location",
     )
     @app_commands.choices(
         meeting_type=TYPE_CHOICES,
         attendees=ATTENDEE_CHOICES,
+        location=LOCATION_CHOICES,
     )
     async def meeting_command(
         interaction: discord.Interaction,
         meeting_type: app_commands.Choice[str],
         attendees: app_commands.Choice[str],
+        location: app_commands.Choice[str],
     ) -> None:
         await interaction.response.send_modal(
             MeetingModal(
@@ -334,5 +409,6 @@ def register_meeting_command(tree: app_commands.CommandTree, notion, reflection,
                 settings=settings,
                 meeting_type=meeting_type.value,
                 attendees_value=attendees.value,
+                location=location.value,
             )
         )

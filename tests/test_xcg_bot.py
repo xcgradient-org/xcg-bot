@@ -3,7 +3,8 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+import datetime as dt
+from unittest.mock import MagicMock, patch
 
 
 BOT_DIR = Path(__file__).resolve().parents[1]
@@ -107,36 +108,68 @@ class StreakTests(unittest.TestCase):
         self.assertTrue(streaks.should_reset_streak("2026-04-08", today))
 
 
-class LogCommandTests(unittest.IsolatedAsyncioTestCase):
-    async def test_process_blocker_follow_up_posts_blocker(self) -> None:
-        bot = MagicMock()
-        interaction = MagicMock()
-        interaction.channel_id = 999
-        interaction.user.id = 123
-        interaction.followup.send = AsyncMock()
-        fake_message = MagicMock()
-        fake_message.content = "@CTO - Need schema review"
+class LogCommandTests(unittest.TestCase):
+    def test_rewrite_blocker_message_uses_llm_response(self) -> None:
+        state = MagicMock()
+        state.founder = {"name": "Oriol", "role": "CEO"}
+        state.notion.task_descriptions.return_value = ["API integration"]
+        state.reflection.generate_json_response.return_value = {
+            "message": "I need the final schema confirmation to finish the API integration today."
+        }
 
-        with patch("log_command.wait_for_follow_up", return_value=fake_message), patch("log_command.post_blocker") as post_blocker:
-            await log_command.process_blocker_follow_up(bot, interaction, "Oriol", 456)
+        message = log_command._rewrite_blocker_message(
+            state,
+            [],
+            target_role="CTO",
+            raw_notes="Blocked on schema details.",
+            raw_blocker="Need schema help from CTO.",
+        )
 
-        post_blocker.assert_awaited_once()
-        interaction.followup.send.assert_awaited_once_with("Blocker posted to the blockers channel.", ephemeral=True)
+        self.assertEqual(
+            message,
+            "I need the final schema confirmation to finish the API integration today.",
+        )
 
-    async def test_process_blocker_follow_up_ignores_no(self) -> None:
-        bot = MagicMock()
-        interaction = MagicMock()
-        interaction.channel_id = 999
-        interaction.user.id = 123
-        interaction.followup.send = AsyncMock()
-        fake_message = MagicMock()
-        fake_message.content = "no"
+    def test_build_blocker_message_mentions_configured_user(self) -> None:
+        settings = MagicMock()
+        settings.discord_user_id_oriol = 111
+        settings.discord_user_id_arnau = 222
+        settings.discord_user_id_adam = 333
 
-        with patch("log_command.wait_for_follow_up", return_value=fake_message), patch("log_command.post_blocker") as post_blocker:
-            await log_command.process_blocker_follow_up(bot, interaction, "Oriol", 456)
+        message = log_command.build_blocker_message(
+            "Oriol",
+            "CTO",
+            "I need the final schema to finish the API integration.",
+            settings,
+        )
 
-        post_blocker.assert_not_called()
-        interaction.followup.send.assert_not_called()
+        self.assertIn("<@222>", message)
+        self.assertIn("Oriol", message)
+
+    def test_build_blocker_message_marks_urgent_when_requested(self) -> None:
+        settings = MagicMock()
+        settings.discord_user_id_oriol = 111
+        settings.discord_user_id_arnau = 222
+        settings.discord_user_id_adam = 333
+
+        message = log_command.build_blocker_message(
+            "Oriol",
+            "CTO",
+            "I need the final schema to finish the API integration.",
+            settings,
+            urgent=True,
+        )
+
+        self.assertIn("URGENT", message)
+        self.assertIn("<@222>", message)
+
+    def test_current_context_uses_previous_day_before_5am_madrid(self) -> None:
+        now = log_command.MADRID_TZ.localize(dt.datetime(2026, 4, 13, 1, 30))
+
+        ctx = log_command.current_context(now)
+
+        self.assertEqual(ctx.today_iso, "2026-04-12")
+        self.assertEqual(ctx.week_code, "26-W15")
 
 
 class MeetingCommandTests(unittest.TestCase):
@@ -147,24 +180,37 @@ class MeetingCommandTests(unittest.TestCase):
     def test_attendee_choice_all_maps_to_all_founders(self) -> None:
         self.assertEqual(meeting_command.ATTENDEE_CHOICES[0].value, "CEO, CTO, COO")
 
-    def test_parse_user_datetime_uses_strict_madrid_format(self) -> None:
-        date_iso = meeting_command._parse_user_datetime("2026-04-17 11:00", default_year=2026)
+    def test_try_parse_user_datetime_uses_strict_madrid_format(self) -> None:
+        date_iso = meeting_command._try_parse_user_datetime("2026-04-17 11:00", default_year=2026)
         self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
 
-    def test_parse_user_datetime_accepts_month_day_without_year(self) -> None:
-        date_iso = meeting_command._parse_user_datetime("04-17 11:00", default_year=2026)
+    def test_try_parse_user_datetime_accepts_month_day_without_year(self) -> None:
+        date_iso = meeting_command._try_parse_user_datetime("04-17 11:00", default_year=2026)
         self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
 
-    def test_parse_user_datetime_uses_llm_fallback(self) -> None:
-        reflection_service = MagicMock()
-        reflection_service.generate_json_response.return_value = {"date_iso": "2026-04-17T11:00:00+02:00"}
-        date_iso = meeting_command._parse_user_datetime(
-            "Friday 17 April at 11",
-            reflection=reflection_service,
-            default_year=2026,
-        )
-        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
-        reflection_service.generate_json_response.assert_called_once()
+    def test_try_parse_user_datetime_handles_this_friday_relative_to_today(self) -> None:
+        base_now = meeting_command.MADRID_TZ.localize(dt.datetime(2026, 4, 12, 16, 0))
+        date_iso = meeting_command._try_parse_user_datetime("this friday", default_year=2026, base_now=base_now)
+        self.assertEqual(date_iso, "2026-04-17T10:00:00+02:00")
+
+    def test_normalize_payload_uses_ai_date_when_present(self) -> None:
+        raw_input = {
+            "title": "Weekly Sync",
+            "date_input": "Friday 17 April at 11",
+            "type": "Weekly Sync",
+            "attendees": "CEO, CTO, COO",
+            "location": "Meet room",
+            "notes": "Discuss blockers",
+        }
+        ai_payload = {
+            "title": "Weekly Sync",
+            "date_iso": "2026-04-17T11:00:00+02:00",
+            "attendees": ["CEO", "CTO", "COO"],
+            "notes_enhanced": "Discuss blockers clearly.",
+        }
+        payload = meeting_command._normalize_payload(raw_input, ai_payload)
+        self.assertEqual(payload["date_iso"], "2026-04-17T11:00:00+02:00")
+        self.assertEqual(payload["notes_enhanced"], "Discuss blockers clearly.")
 
     def test_normalize_payload_falls_back_to_raw_input(self) -> None:
         raw_input = {
@@ -256,6 +302,149 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(result, "source-123")
         service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
 
+    def test_query_log_tasks_combines_done_today_and_current_week(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        tasks = [
+            {
+                "id": "done-today",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-10"}},
+                    "Week": {"type": "select", "select": {"name": "26-W15"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Done today"}]},
+                },
+            },
+            {
+                "id": "todo-this-week",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": False},
+                    "Done date": {"type": "date", "date": None},
+                    "Week": {"type": "select", "select": {"name": "26-W15"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Todo this week"}]},
+                },
+            },
+            {
+                "id": "ignore-other-role",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CTO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-10"}},
+                    "Week": {"type": "select", "select": {"name": "26-W15"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Other role"}]},
+                },
+            },
+        ]
+        with patch.object(service, "_query_all", return_value=tasks):
+            candidates, completed, active_week = service.query_log_tasks("CEO", "2026-04-10", "26-W15")
+
+        self.assertEqual([task["id"] for task in candidates], ["done-today", "todo-this-week"])
+        self.assertEqual([task["id"] for task in completed], ["done-today"])
+        self.assertEqual(active_week, "26-W15")
+
+    def test_query_log_tasks_falls_back_to_latest_week_and_legacy_done_tasks(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        tasks = [
+            {
+                "id": "done-no-date",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": None},
+                    "Week": {"type": "select", "select": {"name": "26-W16"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Legacy done"}]},
+                },
+            },
+            {
+                "id": "todo-same-week",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": False},
+                    "Done date": {"type": "date", "date": None},
+                    "Week": {"type": "select", "select": {"name": "26-W16"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Todo later"}]},
+                },
+            },
+        ]
+        with patch.object(service, "_query_all", return_value=tasks):
+            candidates, completed, active_week = service.query_log_tasks("CEO", "2026-04-12", "26-W15")
+
+        self.assertEqual([task["id"] for task in candidates], ["done-no-date", "todo-same-week"])
+        self.assertEqual([task["id"] for task in completed], ["done-no-date"])
+        self.assertEqual(active_week, "26-W16")
+
+    def test_query_log_tasks_excludes_tasks_done_on_other_days(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        tasks = [
+            {
+                "id": "done-yesterday",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-11"}},
+                    "Week": {"type": "select", "select": {"name": "26-W16"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Done yesterday"}]},
+                },
+            },
+            {
+                "id": "todo-today",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Status": {"type": "checkbox", "checkbox": False},
+                    "Done date": {"type": "date", "date": None},
+                    "Week": {"type": "select", "select": {"name": "26-W16"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Still open"}]},
+                },
+            },
+        ]
+        with patch.object(service, "_query_all", return_value=tasks):
+            candidates, completed, active_week = service.query_log_tasks("CEO", "2026-04-12", "26-W16")
+
+        self.assertEqual([task["id"] for task in candidates], ["todo-today"])
+        self.assertEqual(completed, [])
+        self.assertEqual(active_week, "26-W16")
+
+    def test_set_task_completion_checkbox_clears_done_date(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service.client = MagicMock()
+        service.client.databases.retrieve.return_value = {
+            "properties": {
+                "Status": {"type": "checkbox"},
+            }
+        }
+        task = {
+            "id": "page-1",
+            "properties": {
+                "Status": {"type": "checkbox", "checkbox": True},
+            },
+        }
+
+        service.set_task_completion(task, completed=False, today_iso="2026-04-10")
+
+        service.client.pages.update.assert_called_once_with(
+            page_id="page-1",
+            properties={
+                "Status": {"checkbox": False},
+                "Done date": {"date": None},
+            },
+        )
+
+    def test_has_daily_log_matches_founder_and_date_prefix(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        rows = [
+            {
+                "properties": {
+                    "Founder": {"type": "select", "select": {"name": "Oriol"}},
+                    "Date": {"type": "date", "date": {"start": "2026-04-12T01:20:00+02:00"}},
+                }
+            }
+        ]
+        with patch.object(service, "_query_all", return_value=rows):
+            result = service.has_daily_log("Oriol", "2026-04-12")
+
+        self.assertTrue(result)
+
     def test_create_daily_log_builds_expected_properties(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
         service.client = MagicMock()
@@ -266,8 +455,7 @@ class NotionServiceTests(unittest.TestCase):
             week_code="26-W15",
             today_iso="2026-04-10",
             completed_task_ids=["page-1", "page-2"],
-            raw_notes="note",
-            reflection_text="reflection",
+            notes_text="reflection",
         )
 
         _, kwargs = service.client.pages.create.call_args
@@ -276,6 +464,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["properties"]["Role"]["select"]["name"], "CEO")
         self.assertEqual(kwargs["properties"]["Week"]["select"]["name"], "26-W15")
         self.assertEqual(kwargs["properties"]["Tasks completed"]["relation"], [{"id": "page-1"}, {"id": "page-2"}])
+        self.assertEqual(kwargs["properties"]["Notes"]["rich_text"][0]["text"]["content"], "reflection")
 
 
 if __name__ == "__main__":

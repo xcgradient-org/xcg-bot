@@ -52,6 +52,55 @@ class NotionService:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query remaining tasks: {exc}") from exc
 
+    def query_log_tasks(self, role: str, today_iso: str, week_code: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+        try:
+            tasks = self._query_all(self.tasks_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query log tasks: {exc}") from exc
+
+        role_tasks = [task for task in tasks if self._property_text(task, "Role") == role]
+        active_week = self._resolve_active_week(role_tasks, preferred_week=week_code)
+        if active_week:
+            candidates = [task for task in role_tasks if self._property_text(task, "Week") == active_week]
+        else:
+            candidates = list(role_tasks)
+
+        done_today_ids = {
+            task["id"]
+            for task in role_tasks
+            if self._is_task_done(task) and self._date_matches_day(task, "Done date", today_iso)
+        }
+        done_other_day_ids = {
+            task["id"]
+            for task in role_tasks
+            if self._is_task_done(task)
+            and self._property_date(task, "Done date")
+            and task["id"] not in done_today_ids
+        }
+        candidates = [task for task in candidates if task["id"] not in done_other_day_ids]
+        legacy_done_ids: set[str] = set()
+        if not done_today_ids:
+            legacy_done_ids = {
+                task["id"]
+                for task in candidates
+                if self._is_task_done(task) and not self._property_date(task, "Done date")
+            }
+
+        completed_ids = done_today_ids or legacy_done_ids
+        extra_selected = [task for task in role_tasks if task["id"] in completed_ids and task not in candidates]
+        if extra_selected:
+            candidates = candidates + extra_selected
+
+        candidates.sort(
+            key=lambda task: (
+                task["id"] not in completed_ids,
+                self.task_description(task).lower(),
+                task["id"],
+            )
+        )
+        completed_tasks = [task for task in candidates if task["id"] in completed_ids]
+        return candidates, completed_tasks, active_week or week_code
+
     def create_daily_log(
         self,
         *,
@@ -60,8 +109,7 @@ class NotionService:
         week_code: str,
         today_iso: str,
         completed_task_ids: list[str],
-        raw_notes: str,
-        reflection_text: str,
+        notes_text: str,
     ) -> dict[str, Any]:
         properties = {
             "Title": {"title": [{"type": "text", "text": {"content": f"{founder_name} · {week_code} · {today_iso}"}}]},
@@ -70,8 +118,7 @@ class NotionService:
             "Role": {"select": {"name": founder_role}},
             "Week": {"select": {"name": week_code}},
             "Tasks completed": {"relation": [{"id": page_id} for page_id in completed_task_ids]},
-            "Raw notes": {"rich_text": self._rich_text(raw_notes)},
-            "Enhanced notes": {"rich_text": self._rich_text(reflection_text)},
+            "Notes": {"rich_text": self._rich_text(notes_text)},
         }
         try:
             return self.client.pages.create(
@@ -80,6 +127,17 @@ class NotionService:
             )
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to create daily log in Notion: {exc}") from exc
+
+    def has_daily_log(self, founder_name: str, today_iso: str) -> bool:
+        try:
+            rows = self._query_all(self.daily_logs_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query daily logs: {exc}") from exc
+        return any(
+            self._property_text(row, "Founder") == founder_name
+            and self._date_matches_day(row, "Date", today_iso)
+            for row in rows
+        )
 
     def get_streak_row(self, founder_name: str) -> dict[str, Any]:
         try:
@@ -122,12 +180,18 @@ class NotionService:
             raise RuntimeError(f"Failed to update streak row {row_id}: {exc}") from exc
 
     def task_descriptions(self, tasks: list[dict[str, Any]]) -> list[str]:
-        descriptions = []
+        descriptions: list[str] = []
         for task in tasks:
-            description = self._property_text(task, "Description") or self._property_text(task, "Display ID")
+            description = self.task_description(task)
             if description:
                 descriptions.append(description)
         return descriptions
+
+    def task_description(self, task: dict[str, Any]) -> str:
+        return self._property_text(task, "Description") or self._property_text(task, "Display ID") or "Untitled task"
+
+    def task_display_id(self, task: dict[str, Any]) -> str:
+        return self._property_text(task, "Display ID")
 
     def page_ids(self, pages: list[dict[str, Any]]) -> list[str]:
         return [page["id"] for page in pages]
@@ -140,6 +204,70 @@ class NotionService:
 
     def founder_name(self, row: dict[str, Any]) -> str:
         return self._property_text(row, "Founder")
+
+    def create_completed_task(self, name: str, role: str, today_iso: str) -> dict[str, Any]:
+        """Create a new task in the tasks database already marked as Done for today."""
+        try:
+            db_schema = self.client.databases.retrieve(database_id=self.tasks_db_id)
+            props_schema = db_schema.get("properties", {})
+            title_prop = next(
+                (k for k, v in props_schema.items() if v.get("type") == "title"),
+                "Name",
+            )
+            has_description = props_schema.get("Description", {}).get("type") in ("rich_text",)
+            status_is_checkbox = props_schema.get("Status", {}).get("type") == "checkbox"
+        except Exception:  # noqa: BLE001
+            title_prop = "Name"
+            has_description = False
+            status_is_checkbox = False
+
+        properties: dict[str, Any] = {
+            title_prop: {"title": [{"type": "text", "text": {"content": name}}]},
+            "Role": {"select": {"name": role}},
+            "Done date": {"date": {"start": today_iso}},
+        }
+        if status_is_checkbox:
+            properties["Status"] = {"checkbox": True}
+        else:
+            properties["Status"] = {"status": {"name": "Done"}}
+        if has_description:
+            properties["Description"] = {"rich_text": [{"type": "text", "text": {"content": name}}]}
+
+        try:
+            return self.client.pages.create(
+                parent={"database_id": self.tasks_db_id},
+                properties=properties,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to create task '{name}': {exc}") from exc
+
+    def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
+        status_prop = task.get("properties", {}).get("Status", {})
+        prop_type = status_prop.get("type")
+        db_schema = self.client.databases.retrieve(database_id=self.tasks_db_id)
+        schema_status = db_schema.get("properties", {}).get("Status", {})
+        if not prop_type:
+            prop_type = schema_status.get("type")
+
+        properties: dict[str, Any] = {}
+        if prop_type == "checkbox":
+            properties["Status"] = {"checkbox": completed}
+        elif prop_type == "status":
+            properties["Status"] = {"status": {"name": self._resolve_status_name(schema_status, completed=completed)}}
+        elif prop_type == "select":
+            properties["Status"] = {"select": {"name": self._resolve_status_name(schema_status, completed=completed)}}
+        else:
+            raise RuntimeError("Tasks database is missing a supported Status property.")
+
+        if completed:
+            properties["Done date"] = {"date": {"start": today_iso}}
+        else:
+            properties["Done date"] = {"date": None}
+
+        try:
+            self.client.pages.update(page_id=task["id"], properties=properties)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to update task completion for {task['id']}: {exc}") from exc
 
     def primary_data_source_id(self, database_id: str) -> str:
         database = self.client.databases.retrieve(database_id=database_id)
@@ -223,3 +351,52 @@ class NotionService:
             return []
         chunks = [text[index : index + 2000] for index in range(0, len(text), 2000)]
         return [{"type": "text", "text": {"content": chunk}} for chunk in chunks]
+
+    def _date_matches_day(self, page: dict[str, Any], property_name: str, day_iso: str) -> bool:
+        value = self._property_date(page, property_name)
+        return bool(value) and value.startswith(day_iso)
+
+    def _resolve_active_week(self, tasks: list[dict[str, Any]], *, preferred_week: str) -> str:
+        week_codes = {
+            self._property_text(task, "Week")
+            for task in tasks
+            if self._property_text(task, "Week")
+        }
+        if preferred_week in week_codes:
+            return preferred_week
+        if not week_codes:
+            return preferred_week
+        return max(week_codes, key=self._week_sort_key)
+
+    def _week_sort_key(self, week_code: str) -> tuple[int, int]:
+        try:
+            year_text, week_text = week_code.split("-W", 1)
+            return int(year_text), int(week_text)
+        except Exception:  # noqa: BLE001
+            return (-1, -1)
+
+    def _resolve_status_name(self, schema_status: dict[str, Any], *, completed: bool) -> str:
+        prop_type = schema_status.get("type")
+        option_group = schema_status.get(prop_type or "", {})
+        options = option_group.get("options", [])
+        normalized_options = {
+            str(option.get("name", "")).strip().lower(): str(option.get("name", "")).strip()
+            for option in options
+            if str(option.get("name", "")).strip()
+        }
+
+        if completed:
+            for name in DONE_NAMES:
+                if name in normalized_options:
+                    return normalized_options[name]
+            return "Done"
+
+        for preferred in ("to do", "todo", "not started", "backlog", "planned", "in progress"):
+            if preferred in normalized_options:
+                return normalized_options[preferred]
+
+        for lowered, original in normalized_options.items():
+            if lowered not in DONE_NAMES:
+                return original
+
+        raise RuntimeError("Tasks database does not expose a non-completed Status option.")

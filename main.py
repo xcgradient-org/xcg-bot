@@ -10,6 +10,7 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from blocker_command import register_blocker_command
 from log_command import register_log_command
 from meeting_command import register_meeting_command
 from meetings import start_meeting_reminder_poller, start_new_meeting_poller
@@ -114,8 +115,9 @@ class XCGradientOSBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         register_log_command(self, self.tree, self.notion, self.reflection, self.settings)
+        register_blocker_command(self, self.tree, self.reflection, self.settings)
         register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
-        LOGGER.info("✅ /meeting command registered")
+        LOGGER.info("✅ /meeting and /blocker commands registered")
         synced = await self.tree.sync()
         LOGGER.info("Slash commands synced: %s", len(synced))
 
