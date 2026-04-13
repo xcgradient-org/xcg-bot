@@ -104,7 +104,6 @@ def load_settings() -> Settings:
 class XCGradientOSBot(commands.Bot):
     def __init__(self, settings: Settings, notion: NotionService, reflection: ReflectionService) -> None:
         intents = discord.Intents.default()
-        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
         self.notion = notion
@@ -117,7 +116,7 @@ class XCGradientOSBot(commands.Bot):
         register_log_command(self, self.tree, self.notion, self.reflection, self.settings)
         register_blocker_command(self, self.tree, self.reflection, self.settings)
         register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
-        LOGGER.info("✅ /meeting and /blocker commands registered")
+        LOGGER.info("✅ /meeting, /log, and /blocker commands registered")
         synced = await self.tree.sync()
         LOGGER.info("Slash commands synced: %s", len(synced))
 

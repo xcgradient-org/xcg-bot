@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
 import logging
 from typing import Any
 
@@ -25,19 +24,6 @@ class NotionService:
             self.client.databases.retrieve(database_id=self.streaks_db_id)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Unable to reach required Notion databases: {exc}") from exc
-
-    def query_completed_tasks(self, role: str, today_iso: str) -> list[dict[str, Any]]:
-        try:
-            tasks = self._query_all(self.tasks_db_id)
-            return [
-                task
-                for task in tasks
-                if self._property_text(task, "Role") == role
-                and self._is_task_done(task)
-                and self._property_date(task, "Done date") == today_iso
-            ]
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to query completed tasks: {exc}") from exc
 
     def query_remaining_tasks(self, role: str, week_code: str) -> list[dict[str, Any]]:
         try:
@@ -204,42 +190,6 @@ class NotionService:
 
     def founder_name(self, row: dict[str, Any]) -> str:
         return self._property_text(row, "Founder")
-
-    def create_completed_task(self, name: str, role: str, today_iso: str) -> dict[str, Any]:
-        """Create a new task in the tasks database already marked as Done for today."""
-        try:
-            db_schema = self.client.databases.retrieve(database_id=self.tasks_db_id)
-            props_schema = db_schema.get("properties", {})
-            title_prop = next(
-                (k for k, v in props_schema.items() if v.get("type") == "title"),
-                "Name",
-            )
-            has_description = props_schema.get("Description", {}).get("type") in ("rich_text",)
-            status_is_checkbox = props_schema.get("Status", {}).get("type") == "checkbox"
-        except Exception:  # noqa: BLE001
-            title_prop = "Name"
-            has_description = False
-            status_is_checkbox = False
-
-        properties: dict[str, Any] = {
-            title_prop: {"title": [{"type": "text", "text": {"content": name}}]},
-            "Role": {"select": {"name": role}},
-            "Done date": {"date": {"start": today_iso}},
-        }
-        if status_is_checkbox:
-            properties["Status"] = {"checkbox": True}
-        else:
-            properties["Status"] = {"status": {"name": "Done"}}
-        if has_description:
-            properties["Description"] = {"rich_text": [{"type": "text", "text": {"content": name}}]}
-
-        try:
-            return self.client.pages.create(
-                parent={"database_id": self.tasks_db_id},
-                properties=properties,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to create task '{name}': {exc}") from exc
 
     def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
         status_prop = task.get("properties", {}).get("Status", {})
