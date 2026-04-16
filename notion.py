@@ -108,7 +108,7 @@ class NotionService:
         }
         try:
             return self.client.pages.create(
-                parent={"database_id": self.daily_logs_db_id},
+                parent=self._build_parent(self.daily_logs_db_id),
                 properties=properties,
             )
         except Exception as exc:  # noqa: BLE001
@@ -194,8 +194,8 @@ class NotionService:
     def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
         status_prop = task.get("properties", {}).get("Status", {})
         prop_type = status_prop.get("type")
-        db_schema = self.client.databases.retrieve(database_id=self.tasks_db_id)
-        schema_status = db_schema.get("properties", {}).get("Status", {})
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        schema_status = db_schema.get("Status", {})
         if not prop_type:
             prop_type = schema_status.get("type")
 
@@ -218,6 +218,106 @@ class NotionService:
             self.client.pages.update(page_id=task["id"], properties=properties)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to update task completion for {task['id']}: {exc}") from exc
+
+    def list_projects(self) -> list[dict[str, str]]:
+        schema = self._retrieve_schema(self.tasks_db_id)
+        relation_prop = self._get_schema_property(schema, "Project", "Projects")
+        if not relation_prop:
+            raise RuntimeError("Tasks database is missing a Project relation property.")
+
+        relation_type = relation_prop.get("relation") or {}
+        # Prefer the pre-resolved data_source_id from the relation schema so we
+        # can query the Projects DB directly without calling databases.retrieve
+        # on it (which returns 404 when the DB is only accessible via data sources).
+        data_source_id = relation_type.get("data_source_id")
+        projects_db_id = data_source_id or relation_type.get("database_id")
+        if not projects_db_id:
+            raise RuntimeError("Tasks database Project relation does not expose a related projects database.")
+
+        try:
+            if data_source_id:
+                rows = self._query_all_with_data_source_id(data_source_id)
+            else:
+                rows = self._query_all(projects_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query projects: {exc}") from exc
+
+        projects = []
+        for row in rows:
+            name = self._page_title(row)
+            if not name:
+                continue
+            projects.append({"id": row["id"], "name": name})
+        projects.sort(key=lambda item: item["name"].lower())
+        return projects
+
+    def preview_task_ids(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        role: str,
+        year: int,
+        quarter_name: str,
+        count: int,
+    ) -> list[str]:
+        sequence = self._count_matching_tasks(
+            project_id=project_id,
+            role=role,
+            year=year,
+            quarter_name=quarter_name,
+        )
+        return [f"{project_name}-{role}-{sequence + index}" for index in range(1, count + 1)]
+
+    def create_tasks_batch(
+        self,
+        *,
+        project_id: str,
+        project_name: str,
+        role: str,
+        descriptions: list[str],
+        year: int,
+        quarter_name: str,
+        month_name: str,
+        week_code: str,
+        today_iso: str,
+    ) -> list[dict[str, Any]]:
+        if not descriptions:
+            return []
+
+        display_ids = self.preview_task_ids(
+            project_id=project_id,
+            project_name=project_name,
+            role=role,
+            year=year,
+            quarter_name=quarter_name,
+            count=len(descriptions),
+        )
+        schema = self._retrieve_schema(self.tasks_db_id)
+        created_pages = []
+        for display_id, description in zip(display_ids, descriptions, strict=False):
+            properties = self._build_task_properties(
+                schema=schema,
+                display_id=display_id,
+                description=description,
+                role=role,
+                project_id=project_id,
+                year=year,
+                quarter_name=quarter_name,
+                month_name=month_name,
+                week_code=week_code,
+                today_iso=today_iso,
+            )
+            try:
+                created_pages.append(
+                    self.client.pages.create(
+                        parent=self._build_parent(self.tasks_db_id),
+                        properties=properties,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(f"Failed to create task {display_id} in Notion: {exc}") from exc
+        return created_pages
 
     def primary_data_source_id(self, database_id: str) -> str:
         database = self.client.databases.retrieve(database_id=database_id)
@@ -251,6 +351,61 @@ class NotionService:
             if not response.get("has_more"):
                 return results
             next_cursor = response.get("next_cursor")
+
+    def _query_all_with_data_source_id(self, data_source_id: str) -> list[dict[str, Any]]:
+        """Query a data source directly by its pre-resolved ID, bypassing databases.retrieve."""
+        data_sources = getattr(self.client, "data_sources", None)
+        data_source_query = getattr(data_sources, "query", None) if data_sources is not None else None
+        if data_source_query is not None:
+            results: list[dict[str, Any]] = []
+            next_cursor: str | None = None
+            while True:
+                payload: dict[str, Any] = {"page_size": 100}
+                if next_cursor:
+                    payload["start_cursor"] = next_cursor
+                response = data_source_query(data_source_id=data_source_id, **payload)
+                results.extend(response.get("results", []))
+                if not response.get("has_more"):
+                    return results
+                next_cursor = response.get("next_cursor")
+
+        # Fallback: standard databases.query using the data_source_id as if it's a DB id
+        return self._query_all(data_source_id)
+
+    def _retrieve_schema(self, database_id: str) -> dict[str, Any]:
+        database = self.client.databases.retrieve(database_id=database_id)
+        properties = database.get("properties")
+        if properties:
+            return properties
+
+        source_list = database.get("data_sources", [])
+        if not source_list:
+            raise RuntimeError(f"Database {database_id} does not expose any properties.")
+
+        source = source_list[0]
+        source_properties = source.get("properties")
+        if source_properties:
+            return source_properties
+
+        data_sources = getattr(self.client, "data_sources", None)
+        retrieve_fn = getattr(data_sources, "retrieve", None) if data_sources is not None else None
+        if retrieve_fn is None:
+            raise RuntimeError(f"Database {database_id} requires data source schema support from notion-client.")
+
+        retrieved_source = retrieve_fn(data_source_id=source["id"])
+        properties = retrieved_source.get("properties")
+        if not properties:
+            raise RuntimeError(f"Database {database_id} data source {source['id']} does not expose properties.")
+        return properties
+
+    def _build_parent(self, database_id: str) -> dict[str, str]:
+        data_sources = getattr(self.client, "data_sources", None)
+        if data_sources is not None:
+            try:
+                return {"data_source_id": self.primary_data_source_id(database_id)}
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("Falling back to database_id parent for %s", database_id, exc_info=True)
+        return {"database_id": database_id}
 
     def _is_task_done(self, page: dict[str, Any]) -> bool:
         prop = page.get("properties", {}).get("Status")
@@ -296,11 +451,27 @@ class NotionService:
         value = prop.get("number")
         return int(value or 0)
 
+    def _property_relation_ids(self, page: dict[str, Any], property_name: str) -> list[str]:
+        prop = page.get("properties", {}).get(property_name, {})
+        relation = prop.get("relation") or []
+        return [str(item.get("id", "")).strip() for item in relation if str(item.get("id", "")).strip()]
+
     def _rich_text(self, text: str) -> list[dict[str, Any]]:
         if not text:
             return []
         chunks = [text[index : index + 2000] for index in range(0, len(text), 2000)]
         return [{"type": "text", "text": {"content": chunk}} for chunk in chunks]
+
+    def _page_title(self, page: dict[str, Any]) -> str:
+        properties = page.get("properties", {})
+        for prop in properties.values():
+            if prop.get("type") == "title":
+                return "".join(item.get("plain_text", "") for item in prop.get("title", [])).strip()
+        for fallback_name in ("Name", "Title"):
+            value = self._property_text(page, fallback_name)
+            if value:
+                return value
+        return ""
 
     def _date_matches_day(self, page: dict[str, Any], property_name: str, day_iso: str) -> bool:
         value = self._property_date(page, property_name)
@@ -350,3 +521,183 @@ class NotionService:
                 return original
 
         raise RuntimeError("Tasks database does not expose a non-completed Status option.")
+
+    def _count_matching_tasks(self, *, project_id: str, role: str, year: int, quarter_name: str) -> int:
+        """Return the highest existing sequence number for project+role tasks, or 0 if none found.
+
+        We parse Display IDs (e.g. "ALPHA-COO-7") rather than relying on Year/Quarter metadata
+        fields being filled, which makes this robust to partially-migrated databases.
+        """
+        try:
+            tasks = self._query_all(self.tasks_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query tasks for ID generation: {exc}") from exc
+
+        schema = self._retrieve_schema(self.tasks_db_id)
+        project_property_name = self._existing_property_name(schema, "Project", "Projects")
+        norm_project_id = project_id.replace("-", "").lower()
+
+        # Collect the sequence numbers of existing tasks for this project+role.
+        max_seq = 0
+        prefix = f"-{role}-"
+        for task in tasks:
+            # Filter by project relation first (cheap check).
+            relation_ids = self._property_relation_ids(task, project_property_name) if project_property_name else []
+            norm_relation_ids = [r.replace("-", "").lower() for r in relation_ids]
+            if norm_project_id not in norm_relation_ids:
+                continue
+            # Parse the sequence number out of the Display ID.
+            display_id = self._property_text(task, "Display ID")
+            if prefix in display_id:
+                suffix = display_id.split(prefix, 1)[-1]
+                if suffix.isdigit():
+                    max_seq = max(max_seq, int(suffix))
+
+        if max_seq == 0:
+            LOGGER.debug(
+                "_count_matching_tasks: no existing Display IDs found for role=%r project=%r; starting at 1.",
+                role, project_id,
+            )
+        return max_seq
+
+
+    def _build_task_properties(
+        self,
+        *,
+        schema: dict[str, Any],
+        display_id: str,
+        description: str,
+        role: str,
+        project_id: str,
+        year: int,
+        quarter_name: str,
+        month_name: str,
+        week_code: str,
+        today_iso: str,
+    ) -> dict[str, Any]:
+        properties: dict[str, Any] = {}
+
+        title_name = self._title_property_name(schema)
+        properties[title_name] = {"title": [{"type": "text", "text": {"content": display_id}}]}
+
+        if prop := self._get_schema_property(schema, "Role"):
+            prop_name = self._property_name(prop, "Role")
+            properties[prop_name] = self._build_named_option_value(prop, role)
+        if prop := self._get_schema_property(schema, "Project", "Projects"):
+            prop_name = self._property_name(prop, "Project")
+            properties[prop_name] = {"relation": [{"id": project_id}]}
+        if prop := self._get_schema_property(schema, "Description"):
+            prop_name = self._property_name(prop, "Description")
+            properties[prop_name] = {"rich_text": self._rich_text(description)}
+        if prop := self._get_schema_property(schema, "Year"):
+            prop_name = self._property_name(prop, "Year")
+            properties[prop_name] = {"number": year}
+        if prop := self._get_schema_property(schema, "Quarter"):
+            prop_name = self._property_name(prop, "Quarter")
+            properties[prop_name] = self._build_named_option_value(
+                prop,
+                self._resolve_option_name(prop, preferred_values=[quarter_name, quarter_name.split()[0]]),
+            )
+        if prop := self._get_schema_property(schema, "Month"):
+            prop_name = self._property_name(prop, "Month")
+            properties[prop_name] = self._build_named_option_value(
+                prop,
+                self._resolve_option_name(prop, preferred_values=[month_name]),
+            )
+        if prop := self._get_schema_property(schema, "Week"):
+            prop_name = self._property_name(prop, "Week")
+            properties[prop_name] = self._build_scalar_property_value(prop, week_code)
+        if prop := self._get_schema_property(schema, "Sprint week"):
+            prop_name = self._property_name(prop, "Sprint week")
+            sprint_week = week_code.split("-")[-1]
+            properties[prop_name] = self._build_scalar_property_value(prop, sprint_week)
+        if prop := self._get_schema_property(schema, "Status"):
+            prop_name = self._property_name(prop, "Status")
+            status_type = prop.get("type")
+            if status_type == "checkbox":
+                properties[prop_name] = {"checkbox": False}
+            elif status_type in {"select", "status"}:
+                properties[prop_name] = self._build_named_option_value(
+                    prop,
+                    self._resolve_status_name(prop, completed=False),
+                )
+        if prop := self._get_schema_property(schema, "Done date"):
+            prop_name = self._property_name(prop, "Done date")
+            properties[prop_name] = {"date": None}
+        if prop := self._get_schema_property(schema, "Created on"):
+            prop_name = self._property_name(prop, "Created on")
+            properties[prop_name] = {"date": {"start": today_iso}}
+        return properties
+
+    def _title_property_name(self, schema: dict[str, Any]) -> str:
+        for name, prop in schema.items():
+            if prop.get("type") == "title":
+                return name
+        return "Display ID"
+
+    def _existing_property_name(self, schema: dict[str, Any], *candidate_names: str) -> str | None:
+        lowered = {name.lower(): name for name in schema}
+        for candidate in candidate_names:
+            match = lowered.get(candidate.lower())
+            if match:
+                return match
+        return None
+
+    def _get_schema_property(self, schema: dict[str, Any], *candidate_names: str) -> dict[str, Any] | None:
+        property_name = self._existing_property_name(schema, *candidate_names)
+        if property_name is None:
+            return None
+        return schema[property_name]
+
+    def _property_name(self, prop: dict[str, Any], fallback: str) -> str:
+        return str(prop.get("name") or fallback)
+
+    def _resolve_option_name(self, schema_prop: dict[str, Any], *, preferred_values: list[str]) -> str:
+        prop_type = schema_prop.get("type")
+        option_group = schema_prop.get(prop_type or "", {})
+        options = option_group.get("options", [])
+        normalized = {
+            str(option.get("name", "")).strip().lower(): str(option.get("name", "")).strip()
+            for option in options
+            if str(option.get("name", "")).strip()
+        }
+        for preferred in preferred_values:
+            preferred_text = str(preferred or "").strip()
+            if not preferred_text:
+                continue
+            exact = normalized.get(preferred_text.lower())
+            if exact:
+                return exact
+        for preferred in preferred_values:
+            preferred_text = str(preferred or "").strip().lower()
+            if not preferred_text:
+                continue
+            for lowered, original in normalized.items():
+                if lowered.startswith(preferred_text):
+                    return original
+        if preferred_values:
+            return str(preferred_values[0])
+        raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not expose any options.")
+
+    def _build_named_option_value(self, schema_prop: dict[str, Any], option_name: str) -> dict[str, Any]:
+        prop_type = schema_prop.get("type")
+        if prop_type == "select":
+            return {"select": {"name": option_name}}
+        if prop_type == "status":
+            return {"status": {"name": option_name}}
+        raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not support named options.")
+
+    def _build_scalar_property_value(self, schema_prop: dict[str, Any], value: str) -> dict[str, Any]:
+        prop_type = schema_prop.get("type")
+        if prop_type == "select":
+            option_name = self._resolve_option_name(schema_prop, preferred_values=[value])
+            return {"select": {"name": option_name}}
+        if prop_type == "status":
+            option_name = self._resolve_option_name(schema_prop, preferred_values=[value])
+            return {"status": {"name": option_name}}
+        if prop_type == "rich_text":
+            return {"rich_text": self._rich_text(value)}
+        if prop_type == "number":
+            digits = "".join(char for char in value if char.isdigit())
+            return {"number": int(digits)} if digits else {"number": None}
+        raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not support scalar task values.")

@@ -17,6 +17,7 @@ from meetings import start_meeting_reminder_poller, start_new_meeting_poller
 from notion import NotionService
 from reflection import ReflectionService
 from streaks import start_daily_reset_task
+from task_command import register_task_command
 
 
 LOGGER = logging.getLogger("xcg_bot")
@@ -116,7 +117,8 @@ class XCGradientOSBot(commands.Bot):
         register_log_command(self, self.tree, self.notion, self.reflection, self.settings)
         register_blocker_command(self, self.tree, self.reflection, self.settings)
         register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
-        LOGGER.info("✅ /meeting, /log, and /blocker commands registered")
+        register_task_command(self, self.tree, self.notion, self.reflection, self.settings)
+        LOGGER.info("✅ /meeting, /log, /blocker, and /tasks commands registered")
         synced = await self.tree.sync()
         LOGGER.info("Slash commands synced: %s", len(synced))
 
@@ -176,8 +178,15 @@ def main() -> None:
     LOGGER.info("Startup checks passed: Notion databases are reachable.")
 
     reflection = ReflectionService(model=settings.ollama_model, base_url=settings.ollama_base_url)
-    reflection.verify_startup()
-    LOGGER.info("Ollama client initialized with model %s at %s.", settings.ollama_model, settings.ollama_base_url)
+    try:
+        reflection.verify_startup()
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning(
+            "Ollama is unavailable at startup (%s). Bot will continue with degraded AI features.",
+            exc,
+        )
+    else:
+        LOGGER.info("Ollama client initialized with model %s at %s.", settings.ollama_model, settings.ollama_base_url)
 
     bot = XCGradientOSBot(settings=settings, notion=notion, reflection=reflection)
     bot.run(settings.discord_token, log_handler=None)

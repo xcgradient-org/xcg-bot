@@ -217,13 +217,24 @@ async def _finalize_log(
             )
 
         remaining_tasks = state.notion.query_remaining_tasks(founder_role, ctx.week_code)
-        reflection_text = state.reflection.generate_reflection(
-            founder_name=founder_name,
-            founder_role=founder_role,
-            today_iso=ctx.today_iso,
-            completed_tasks=state.notion.task_descriptions(task_pages),
-            raw_notes=raw_notes,
-        )
+        task_descriptions = state.notion.task_descriptions(task_pages)
+        try:
+            reflection_text = state.reflection.generate_reflection(
+                founder_name=founder_name,
+                founder_role=founder_role,
+                today_iso=ctx.today_iso,
+                completed_tasks=task_descriptions,
+                raw_notes=raw_notes,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Reflection generation failed; using fallback note: %s", exc)
+            reflection_text = state.reflection.build_fallback_reflection(
+                founder_name=founder_name,
+                founder_role=founder_role,
+                today_iso=ctx.today_iso,
+                completed_tasks=task_descriptions,
+                raw_notes=raw_notes,
+            )
         state.notion.create_daily_log(
             founder_name=founder_name,
             founder_role=founder_role,

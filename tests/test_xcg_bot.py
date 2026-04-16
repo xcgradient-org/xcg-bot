@@ -18,6 +18,7 @@ import meetings
 import notion
 import reflection
 import streaks
+import task_command
 
 
 class LoadSettingsTests(unittest.TestCase):
@@ -88,6 +89,21 @@ class ReflectionServiceTests(unittest.TestCase):
                     completed_tasks=["Task A"],
                     raw_notes="",
                 )
+
+    def test_build_fallback_reflection_includes_tasks_and_notes(self) -> None:
+        service = reflection.ReflectionService(model="qwen2.5:32b")
+
+        note = service.build_fallback_reflection(
+            founder_name="Oriol",
+            founder_role="CEO",
+            today_iso="2026-04-16",
+            completed_tasks=["Task A", "Task B"],
+            raw_notes="Need follow-up tomorrow.",
+        )
+
+        self.assertIn("2026-04-16", note)
+        self.assertIn("Task A; Task B", note)
+        self.assertIn("Need follow-up tomorrow.", note)
 
 
 class StreakTests(unittest.TestCase):
@@ -241,6 +257,149 @@ class MeetingCommandTests(unittest.TestCase):
         self.assertIn("Client — Tuesday 14 April, 10:00", message)
         self.assertNotIn("📝", message)
         self.assertIn("Posted in #announcements.", message)
+
+
+class TaskCommandTests(unittest.TestCase):
+    def test_normalize_task_descriptions_deduplicates_and_cleans(self) -> None:
+        payload = {
+            "tasks": [
+                {"description": "  Draft investor update  "},
+                {"description": "Draft investor update"},
+                {"description": "Prepare demo script"},
+            ]
+        }
+
+        descriptions = task_command._normalize_task_descriptions(payload)
+
+        self.assertEqual(descriptions, ["Draft investor update", "Prepare demo script"])
+
+    def test_fallback_task_descriptions_splits_two_task_request(self) -> None:
+        descriptions = task_command._fallback_task_descriptions("add 2 tasks: draft investor update and prepare demo script")
+
+        self.assertEqual(descriptions, ["draft investor update", "prepare demo script"])
+
+    def test_parse_task_descriptions_uses_fallback_when_llm_returns_invalid_payload(self) -> None:
+        reflection_service = MagicMock()
+        reflection_service.generate_json_response.return_value = {"unexpected": []}
+
+        descriptions = task_command._parse_task_descriptions(
+            reflection_service,
+            "add 2 tasks: draft investor update and prepare demo script",
+        )
+
+        self.assertEqual(descriptions, ["draft investor update", "prepare demo script"])
+
+
+class NotionTaskCreationTests(unittest.TestCase):
+    def test_list_projects_uses_related_database(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        with patch.object(service, "_retrieve_schema", return_value={"Project": {"type": "relation", "relation": {"database_id": "projects-db"}}}):
+            with patch.object(
+                service,
+                "_query_all",
+                return_value=[
+                    {"id": "proj-1", "properties": {"Name": {"type": "title", "title": [{"plain_text": "ALPHA"}]}}},
+                    {"id": "proj-2", "properties": {"Name": {"type": "title", "title": [{"plain_text": "NEON"}]}}},
+                ],
+            ):
+                projects = service.list_projects()
+
+        self.assertEqual(projects, [{"id": "proj-1", "name": "ALPHA"}, {"id": "proj-2", "name": "NEON"}])
+
+    def test_preview_task_ids_counts_matching_project_role_quarter_year(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Year": {"type": "number", "number": 2026},
+                    "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
+                    "Project": {"type": "relation", "relation": [{"id": "proj-1"}]},
+                },
+            },
+            {
+                "id": "task-2",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CEO"}},
+                    "Year": {"type": "number", "number": 2026},
+                    "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
+                    "Project": {"type": "relation", "relation": [{"id": "proj-1"}]},
+                },
+            },
+            {
+                "id": "task-3",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "CTO"}},
+                    "Year": {"type": "number", "number": 2026},
+                    "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
+                    "Project": {"type": "relation", "relation": [{"id": "proj-1"}]},
+                },
+            },
+        ]
+        with patch.object(service, "_retrieve_schema", return_value={"Project": {"type": "relation"}}):
+            with patch.object(service, "_query_all", return_value=tasks):
+                preview_ids = service.preview_task_ids(
+                    project_id="proj-1",
+                    project_name="ALPHA",
+                    role="CEO",
+                    year=2026,
+                    quarter_name="Q2 2026",
+                    count=2,
+                )
+
+        self.assertEqual(preview_ids, ["ALPHA-CEO-3", "ALPHA-CEO-4"])
+
+    def test_create_tasks_batch_builds_expected_properties(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service.client = MagicMock()
+        service.client.data_sources = None
+        schema = {
+            "Display ID": {"type": "title"},
+            "Role": {"type": "select", "select": {"options": [{"name": "CEO"}]}},
+            "Project": {"type": "relation"},
+            "Description": {"type": "rich_text"},
+            "Year": {"type": "number"},
+            "Quarter": {"type": "select", "select": {"options": [{"name": "Q2 2026"}]}},
+            "Month": {"type": "select", "select": {"options": [{"name": "Apr"}]}},
+            "Week": {"type": "select", "select": {"options": [{"name": "26-W16"}]}},
+            "Status": {"type": "checkbox"},
+            "Done date": {"type": "date"},
+        }
+        with patch.object(service, "_retrieve_schema", return_value=schema):
+            with patch.object(service, "preview_task_ids", return_value=["ALPHA-CEO-1", "ALPHA-CEO-2"]):
+                service.create_tasks_batch(
+                    project_id="proj-1",
+                    project_name="ALPHA",
+                    role="CEO",
+                    descriptions=["Draft investor update", "Prepare demo script"],
+                    year=2026,
+                    quarter_name="Q2 2026",
+                    month_name="Apr",
+                    week_code="26-W16",
+                    today_iso="2026-04-16",
+                )
+
+        create_calls = service.client.pages.create.call_args_list
+        self.assertEqual(len(create_calls), 2)
+        first_kwargs = create_calls[0].kwargs
+        self.assertEqual(first_kwargs["parent"], {"database_id": "tasks-db"})
+        self.assertEqual(
+            first_kwargs["properties"]["Display ID"]["title"][0]["text"]["content"],
+            "ALPHA-CEO-1",
+        )
+        self.assertEqual(first_kwargs["properties"]["Role"]["select"]["name"], "CEO")
+        self.assertEqual(first_kwargs["properties"]["Project"]["relation"], [{"id": "proj-1"}])
+        self.assertEqual(
+            first_kwargs["properties"]["Description"]["rich_text"][0]["text"]["content"],
+            "Draft investor update",
+        )
+        self.assertEqual(first_kwargs["properties"]["Year"]["number"], 2026)
+        self.assertEqual(first_kwargs["properties"]["Quarter"]["select"]["name"], "Q2 2026")
+        self.assertEqual(first_kwargs["properties"]["Month"]["select"]["name"], "Apr")
+        self.assertEqual(first_kwargs["properties"]["Week"]["select"]["name"], "26-W16")
+        self.assertFalse(first_kwargs["properties"]["Status"]["checkbox"])
+        self.assertIsNone(first_kwargs["properties"]["Done date"]["date"])
 
 
 class MeetingsFormattingTests(unittest.TestCase):
@@ -448,6 +607,7 @@ class NotionServiceTests(unittest.TestCase):
     def test_create_daily_log_builds_expected_properties(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
         service.client = MagicMock()
+        service.client.data_sources = None
 
         service.create_daily_log(
             founder_name="Oriol",

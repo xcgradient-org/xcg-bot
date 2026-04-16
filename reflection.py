@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from urllib import error, request
 
 
 LOGGER = logging.getLogger("xcg_bot.reflection")
 DEFAULT_MODEL = "qwen2.5:32b"
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
+GEMINI_MODEL = "gemini-2.5-flash-lite-preview"
 SYSTEM_PROMPT = (
     "You are an EOD writing assistant for a B2B SaaS startup. "
     "Write a concise formal daily note in first person based on the completed tasks and notes provided. "
@@ -21,6 +23,10 @@ class ReflectionService:
     def __init__(self, *, model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
+
+    # ------------------------------------------------------------------
+    # Ollama transport
+    # ------------------------------------------------------------------
 
     def _get_json(self, path: str) -> dict:
         req = request.Request(
@@ -62,7 +68,7 @@ class ReflectionService:
                 f"Available models: {', '.join(sorted(model for model in models if model)) or 'none'}"
             )
 
-    def _request(
+    def _ollama_request(
         self,
         *,
         system_prompt: str,
@@ -87,6 +93,54 @@ class ReflectionService:
     def _extract_text(self, payload: dict) -> str:
         return str(payload.get("response", "")).strip()
 
+    # ------------------------------------------------------------------
+    # Gemini CLI fallback
+    # ------------------------------------------------------------------
+
+    def _gemini_text(self, *, system_prompt: str, user_prompt: str) -> str:
+        """Call the local `gemini` CLI and return its text output."""
+        full_prompt = f"{system_prompt}\n\n{user_prompt}"
+        try:
+            result = subprocess.run(  # noqa: S603
+                ["gemini", "-p", full_prompt],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("gemini CLI not found on PATH") from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("gemini CLI timed out") from exc
+
+        output = result.stdout.strip()
+        if result.returncode != 0 or not output:
+            stderr = result.stderr.strip()
+            raise RuntimeError(f"gemini CLI failed (exit {result.returncode}): {stderr or 'no output'}")
+        return output
+
+    def _gemini_json(self, *, system_prompt: str, user_prompt: str) -> dict:
+        """Call the Gemini CLI asking for JSON output and parse the result."""
+        json_system = (
+            system_prompt
+            + "\n\nIMPORTANT: Your entire response must be valid JSON only. No markdown, no explanation."
+        )
+        text = self._gemini_text(system_prompt=json_system, user_prompt=user_prompt)
+        # Strip markdown code fences if the model wrapped the JSON
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines()
+                if not line.strip().startswith("```")
+            ).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"Gemini CLI returned invalid JSON: {exc}\nRaw: {text[:300]}") from exc
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
     def generate_reflection(
         self,
         *,
@@ -104,15 +158,39 @@ class ReflectionService:
             f"Notes: {notes_text}"
         )
 
-        payload = self._request(
-            system_prompt=SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            max_output_tokens=250,
-        )
-        reflection = self._extract_text(payload)
+        try:
+            payload = self._ollama_request(
+                system_prompt=SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                max_output_tokens=250,
+            )
+            reflection = self._extract_text(payload)
+            if not reflection:
+                raise RuntimeError("Ollama returned an empty reflection.")
+            return reflection
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Ollama reflection failed, trying Gemini CLI: %s", exc)
+
+        reflection = self._gemini_text(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
         if not reflection:
-            raise RuntimeError("Ollama returned an empty reflection.")
+            raise RuntimeError("Gemini CLI returned an empty reflection.")
         return reflection
+
+    def build_fallback_reflection(
+        self,
+        *,
+        founder_name: str,
+        founder_role: str,
+        today_iso: str,
+        completed_tasks: list[str],
+        raw_notes: str,
+    ) -> str:
+        del founder_name, founder_role
+        task_text = "; ".join(task.strip() for task in completed_tasks if str(task).strip()) or "No completed tasks were recorded."
+        notes_text = " ".join(str(raw_notes or "").strip().split())
+        if notes_text:
+            return f"On {today_iso}, I completed: {task_text}. Notes: {notes_text}"
+        return f"On {today_iso}, I completed: {task_text}."
 
     def generate_json_response(
         self,
@@ -121,16 +199,20 @@ class ReflectionService:
         user_prompt: str,
         max_output_tokens: int = 500,
     ) -> dict:
-        payload = self._request(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            response_mime_type="application/json",
-            max_output_tokens=max_output_tokens,
-        )
-        text = self._extract_text(payload)
-        if not text:
-            raise RuntimeError("Ollama returned an empty JSON response.")
         try:
+            payload = self._ollama_request(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_mime_type="application/json",
+                max_output_tokens=max_output_tokens,
+            )
+            text = self._extract_text(payload)
+            if not text:
+                raise RuntimeError("Ollama returned an empty JSON response.")
             return json.loads(text)
         except json.JSONDecodeError as exc:
             raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Ollama JSON response failed, trying Gemini CLI: %s", exc)
+
+        return self._gemini_json(system_prompt=system_prompt, user_prompt=user_prompt)
