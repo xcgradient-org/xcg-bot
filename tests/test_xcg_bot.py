@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 import datetime as dt
@@ -22,6 +23,33 @@ import task_command
 
 
 class LoadSettingsTests(unittest.TestCase):
+    def test_load_environment_prefers_bot_local_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bot_env = Path(tmpdir) / "xcg-bot.env"
+            root_env = Path(tmpdir) / "root.env"
+            bot_env.write_text("DISCORD_TOKEN=test\n", encoding="utf-8")
+            root_env.write_text("DISCORD_TOKEN=test\n", encoding="utf-8")
+
+            with patch.object(main, "ENV_PATHS", (bot_env, root_env)):
+                with patch("main.load_dotenv") as load_dotenv:
+                    env_path = main.load_environment()
+
+        self.assertEqual(env_path, bot_env)
+        load_dotenv.assert_called_once_with(bot_env)
+
+    def test_load_environment_falls_back_to_parent_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            missing_bot_env = Path(tmpdir) / "missing.env"
+            root_env = Path(tmpdir) / "root.env"
+            root_env.write_text("DISCORD_TOKEN=test\n", encoding="utf-8")
+
+            with patch.object(main, "ENV_PATHS", (missing_bot_env, root_env)):
+                with patch("main.load_dotenv") as load_dotenv:
+                    env_path = main.load_environment()
+
+        self.assertEqual(env_path, root_env)
+        load_dotenv.assert_called_once_with(root_env)
+
     @patch("main.load_environment")
     def test_load_settings_uses_legacy_notion_env_names(self, load_environment: MagicMock) -> None:
         load_environment.return_value = Path("/tmp/fake.env")

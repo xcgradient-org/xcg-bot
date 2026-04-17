@@ -21,7 +21,10 @@ from task_command import register_task_command
 
 
 LOGGER = logging.getLogger("xcg_bot")
-ENV_PATH = Path(__file__).resolve().parents[1] / ".env"
+ENV_PATHS = (
+    Path(__file__).resolve().parent / ".env",
+    Path(__file__).resolve().parents[1] / ".env",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,16 +53,18 @@ def configure_logging() -> None:
 
 
 def load_environment() -> Path | None:
-    if ENV_PATH.exists():
-        load_dotenv(ENV_PATH)
-        return ENV_PATH
+    for env_path in ENV_PATHS:
+        if env_path.exists():
+            load_dotenv(env_path)
+            return env_path
     return None
 
 
 def load_settings() -> Settings:
     env_path = load_environment()
     if env_path is None:
-        raise RuntimeError("No .env file found at automation/.env.")
+        searched_paths = ", ".join(str(path) for path in ENV_PATHS)
+        raise RuntimeError(f"No .env file found. Searched: {searched_paths}")
 
     notion_tasks_db_id = os.getenv("NOTION_TASKS_DB_ID", "").strip() or os.getenv("NOTION_TASKS_DB", "").strip()
     notion_daily_logs_db_id = os.getenv("NOTION_DAILY_LOGS_DB_ID", "").strip() or os.getenv("NOTION_DAILY_LOGS_DB", "").strip()
