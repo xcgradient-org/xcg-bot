@@ -10,10 +10,12 @@ The main operational bot for XC Gradient, managing Discord logging, tasks, and m
 - **Reflection:** Daily/weekly reflection tools.
 - **Streaks:** Tracking operational momentum.
 
-## ⚙️ Installation
+## 📥 Installation
 
-1. Install dependencies (Python 3.10+):
+1. Clone the repo and install dependencies (Python 3.10+):
    ```bash
+   git clone <repo-url>
+   cd xcg-bot
    pip install -r requirements.txt
    ```
 2. Configure environment variables in `.env`:
@@ -23,10 +25,13 @@ The main operational bot for XC Gradient, managing Discord logging, tasks, and m
    NOTION_DATABASE_ID=...
    GEMINI_API_KEY=...
    ```
-3. Run the bot:
-   ```bash
-   python main.py
-   ```
+
+## 🛠️ Usage
+
+Run the bot:
+```bash
+python main.py
+```
 
 ## 📂 Core Modules
 
@@ -34,6 +39,10 @@ The main operational bot for XC Gradient, managing Discord logging, tasks, and m
 - `notion.py`: Notion API wrapper and data management.
 - `task_command.py`: Logic for task creation and AI parsing.
 - `meeting_command.py`: Management of operational syncs.
+
+## 👨‍💻 Development
+
+To add new commands, implement them within the appropriate `*_command.py` module and register the new slash command in `main.py`.
 
 ## 🐳 Docker & CI/CD
 
