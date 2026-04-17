@@ -35,6 +35,22 @@ The main operational bot for XC Gradient, managing Discord logging, tasks, and m
 - `task_command.py`: Logic for task creation and AI parsing.
 - `meeting_command.py`: Management of operational syncs.
 
+## 🐳 Docker & CI/CD
+
+The bot is fully containerized for reliable deployment.
+
+### Run in Docker
+```bash
+docker build -t xcg-bot .
+docker run --rm --env-file .env xcg-bot
+```
+
+### GitHub Actions
+Every push to `main` triggers:
+- **Test:** Runs all Python tests via `pytest`.
+- **Lint:** Checks code quality with `flake8`.
+- **Build & Push:** Automatically pushes the latest image to `ghcr.io/xcgradient-org/xcg-bot:latest`.
+
 ## ⚖️ License
 
 All rights reserved. © 2026 XC Gradient.
