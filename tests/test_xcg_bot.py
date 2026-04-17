@@ -74,21 +74,22 @@ class ReflectionServiceTests(unittest.TestCase):
 
     def test_generate_json_response_parses_json_payload(self) -> None:
         service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_request", return_value={"response": '{"ok": true, "count": 2}'}):
+        with patch.object(service, "_ollama_request", return_value={"response": '{"ok": true, "count": 2}'}):
             payload = service.generate_json_response(system_prompt="s", user_prompt="u")
         self.assertEqual(payload, {"ok": True, "count": 2})
 
     def test_generate_reflection_raises_on_empty_response(self) -> None:
         service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_request", return_value={"response": ""}):
-            with self.assertRaisesRegex(RuntimeError, "empty reflection"):
-                service.generate_reflection(
-                    founder_name="Oriol",
-                    founder_role="CEO",
-                    today_iso="2026-04-10",
-                    completed_tasks=["Task A"],
-                    raw_notes="",
-                )
+        with patch.object(service, "_ollama_request", return_value={"response": ""}):
+            with patch.object(service, "_gemini_text", return_value=""):
+                with self.assertRaisesRegex(RuntimeError, "empty reflection"):
+                    service.generate_reflection(
+                        founder_name="Oriol",
+                        founder_role="CEO",
+                        today_iso="2026-04-10",
+                        completed_tasks=["Task A"],
+                        raw_notes="",
+                    )
 
     def test_build_fallback_reflection_includes_tasks_and_notes(self) -> None:
         service = reflection.ReflectionService(model="qwen2.5:32b")
@@ -312,6 +313,7 @@ class NotionTaskCreationTests(unittest.TestCase):
             {
                 "id": "task-1",
                 "properties": {
+                    "Display ID": {"type": "title", "title": [{"plain_text": "ALPHA-CEO-1"}]},
                     "Role": {"type": "select", "select": {"name": "CEO"}},
                     "Year": {"type": "number", "number": 2026},
                     "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
@@ -321,6 +323,7 @@ class NotionTaskCreationTests(unittest.TestCase):
             {
                 "id": "task-2",
                 "properties": {
+                    "Display ID": {"type": "title", "title": [{"plain_text": "ALPHA-CEO-2"}]},
                     "Role": {"type": "select", "select": {"name": "CEO"}},
                     "Year": {"type": "number", "number": 2026},
                     "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
@@ -330,6 +333,7 @@ class NotionTaskCreationTests(unittest.TestCase):
             {
                 "id": "task-3",
                 "properties": {
+                    "Display ID": {"type": "title", "title": [{"plain_text": "ALPHA-CTO-1"}]},
                     "Role": {"type": "select", "select": {"name": "CTO"}},
                     "Year": {"type": "number", "number": 2026},
                     "Quarter": {"type": "select", "select": {"name": "Q2 2026"}},
