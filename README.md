@@ -33,6 +33,37 @@ Run the bot:
 python main.py
 ```
 
+## 🕸️ Code Graph
+
+The repo also includes a local `graphify` workflow that builds a dependency graph for the whole bot codebase and exports it to Obsidian.
+
+From inside `xcg-bot/`:
+
+```bash
+make graph
+```
+
+What this does:
+
+- extracts the code graph from the local repo
+- regenerates `graphify-out/graph.json`, `graphify-out/graph.html`, `graphify-out/wiki/`, and `graphify-out/GRAPH_REPORT.md`
+- exports Obsidian notes to `~/vault/graphify/xcg-bot`
+- opens that Obsidian vault
+
+If you want a rebuild without launching Obsidian:
+
+```bash
+make graph-no-obsidian
+```
+
+If you just want to validate the graph inputs:
+
+```bash
+make validate-graph
+```
+
+When the code changes, rerun `make graph`. There is no seed file in this repo: the graph is rebuilt directly from the source code each time.
+
 ## 📂 Core Modules
 
 - `main.py`: Discord client and command registration.
