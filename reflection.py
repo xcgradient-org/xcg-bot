@@ -9,6 +9,7 @@ from urllib import error, request
 LOGGER = logging.getLogger("xcg_bot.reflection")
 DEFAULT_MODEL = "qwen2.5:32b"
 DEFAULT_BASE_URL = "http://127.0.0.1:11434"
+DEFAULT_API_STYLE = "ollama"
 GEMINI_MODEL = "gemini-2.5-flash-lite-preview"
 SYSTEM_PROMPT = (
     "You are an EOD writing assistant for a B2B SaaS startup. "
@@ -20,9 +21,24 @@ SYSTEM_PROMPT = (
 
 
 class ReflectionService:
-    def __init__(self, *, model: str = DEFAULT_MODEL, base_url: str = DEFAULT_BASE_URL) -> None:
+    def __init__(
+        self,
+        *,
+        model: str = DEFAULT_MODEL,
+        base_url: str = DEFAULT_BASE_URL,
+        api_key: str = "",
+        api_style: str = DEFAULT_API_STYLE,
+    ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.api_style = api_style.strip().lower() or DEFAULT_API_STYLE
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     # ------------------------------------------------------------------
     # Ollama transport
@@ -31,7 +47,7 @@ class ReflectionService:
     def _get_json(self, path: str) -> dict:
         req = request.Request(
             f"{self.base_url}{path}",
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
             method="GET",
         )
         try:
@@ -47,7 +63,7 @@ class ReflectionService:
         req = request.Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers=self._headers(),
             method="POST",
         )
         try:
@@ -60,6 +76,16 @@ class ReflectionService:
             raise RuntimeError(f"Ollama request failed: {exc}") from exc
 
     def verify_startup(self) -> None:
+        if self.api_style == "openai":
+            payload = self._get_json("/models")
+            models = {item.get("id", "").strip() for item in payload.get("data", [])}
+            if self.model not in models:
+                raise RuntimeError(
+                    f"Configured OpenAI-compatible model {self.model!r} is not available. "
+                    f"Available models: {', '.join(sorted(model for model in models if model)) or 'none'}"
+                )
+            return
+
         payload = self._get_json("/api/tags")
         models = {item.get("name", "").strip() for item in payload.get("models", [])}
         if self.model not in models:
@@ -90,8 +116,79 @@ class ReflectionService:
             payload["format"] = "json"
         return self._post_json("/api/generate", payload)
 
+    def _openai_request(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        response_mime_type: str | None = None,
+        max_output_tokens: int = 400,
+    ) -> dict:
+        if response_mime_type == "application/json":
+            system_prompt = (
+                system_prompt
+                + "\n\nIMPORTANT: Your entire response must be valid JSON only. No markdown, no explanation."
+            )
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "temperature": 0.2,
+            "max_tokens": max_output_tokens,
+        }
+        del response_mime_type
+        return self._post_json("/chat/completions", payload)
+
+    def _model_request(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        response_mime_type: str | None = None,
+        max_output_tokens: int = 400,
+    ) -> dict:
+        if self.api_style == "openai":
+            return self._openai_request(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_mime_type=response_mime_type,
+                max_output_tokens=max_output_tokens,
+            )
+        return self._ollama_request(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_mime_type=response_mime_type,
+            max_output_tokens=max_output_tokens,
+        )
+
     def _extract_text(self, payload: dict) -> str:
-        return str(payload.get("response", "")).strip()
+        if "response" in payload:
+            return str(payload.get("response", "")).strip()
+        choices = payload.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {})
+            if isinstance(message, dict):
+                return str(message.get("content", "")).strip()
+        return ""
+
+    def _parse_json_text(self, text: str) -> dict:
+        cleaned = text.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(
+                line for line in cleaned.splitlines()
+                if not line.strip().startswith("```")
+            ).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                return json.loads(cleaned[start : end + 1])
+            raise
 
     # ------------------------------------------------------------------
     # Gemini CLI fallback
@@ -159,7 +256,7 @@ class ReflectionService:
         )
 
         try:
-            payload = self._ollama_request(
+            payload = self._model_request(
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=user_prompt,
                 max_output_tokens=250,
@@ -169,7 +266,7 @@ class ReflectionService:
                 raise RuntimeError("Ollama returned an empty reflection.")
             return reflection
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Ollama reflection failed, trying Gemini CLI: %s", exc)
+            LOGGER.warning("Primary LLM reflection failed, trying Gemini CLI: %s", exc)
 
         reflection = self._gemini_text(system_prompt=SYSTEM_PROMPT, user_prompt=user_prompt)
         if not reflection:
@@ -200,7 +297,7 @@ class ReflectionService:
         max_output_tokens: int = 500,
     ) -> dict:
         try:
-            payload = self._ollama_request(
+            payload = self._model_request(
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 response_mime_type="application/json",
@@ -209,10 +306,10 @@ class ReflectionService:
             text = self._extract_text(payload)
             if not text:
                 raise RuntimeError("Ollama returned an empty JSON response.")
-            return json.loads(text)
+            return self._parse_json_text(text)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
+            raise RuntimeError(f"LLM backend returned invalid JSON: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Ollama JSON response failed, trying Gemini CLI: %s", exc)
+            LOGGER.warning("Primary LLM JSON response failed, trying Gemini CLI: %s", exc)
 
         return self._gemini_json(system_prompt=system_prompt, user_prompt=user_prompt)

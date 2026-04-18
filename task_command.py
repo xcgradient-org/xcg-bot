@@ -33,6 +33,8 @@ TASK_PARSE_PROMPT = (
     "tasks must be an array of objects, each with exactly one key: description. "
     "Each description must be a short, concrete, imperative task sentence. "
     "Split bundled requests into separate tasks when the user clearly asks for multiple tasks. "
+    "Do not split a single feature request into multiple tasks just because it contains commas, metric lists, implementation details, or acceptance criteria. "
+    "Prefer one broader task unless the user clearly describes separate deliverables. "
     "Do not invent project names, owners, deadlines, IDs, priorities, status, or metadata. "
     "Do not add markdown or commentary."
 )
@@ -112,6 +114,10 @@ def _strip_task_prefix(text: str) -> str:
     return stripped.strip()
 
 
+def _explicit_task_count_requested(text: str) -> bool:
+    return bool(re.search(r"\b(?:2|3|4|5|two|three|four|five)\s+tasks?\b", text, flags=re.IGNORECASE))
+
+
 def _fallback_task_descriptions(text: str) -> list[str]:
     stripped = _strip_task_prefix(text)
     if not stripped:
@@ -122,8 +128,6 @@ def _fallback_task_descriptions(text: str) -> list[str]:
         single = chunks[0]
         if re.search(r"\b(?:2|two)\s+tasks?\b", text, flags=re.IGNORECASE):
             chunks = [part.strip() for part in re.split(r"\s+\band\b\s+", single, maxsplit=1, flags=re.IGNORECASE) if part.strip()]
-        elif "," in single:
-            chunks = [part.strip() for part in single.split(",") if part.strip()]
 
     descriptions: list[str] = []
     seen: set[str] = set()
@@ -151,6 +155,22 @@ def _parse_task_descriptions(reflection, raw_text: str) -> list[str]:
         LOGGER.warning("Task parsing via LLM failed; falling back to heuristics: %s", exc)
 
     descriptions = _normalize_task_descriptions(payload)
+    if descriptions and not _explicit_task_count_requested(raw_text) and len(descriptions) > 4:
+        coarse_descriptions = _fallback_task_descriptions(raw_text)
+        if 1 < len(coarse_descriptions) <= 4:
+            LOGGER.warning(
+                "Task parsing returned %s tasks without an explicit multi-task request; using coarse fallback with %s tasks for text: %s",
+                len(descriptions),
+                len(coarse_descriptions),
+                raw_text,
+            )
+            return coarse_descriptions
+        LOGGER.warning(
+            "Task parsing returned %s tasks without an explicit multi-task request; limiting to the first 4 tasks for text: %s",
+            len(descriptions),
+            raw_text,
+        )
+        return descriptions[:4]
     if descriptions:
         return descriptions
     return _fallback_task_descriptions(raw_text)

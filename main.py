@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,7 @@ ENV_PATHS = (
     Path(__file__).resolve().parent / ".env",
     Path(__file__).resolve().parents[1] / ".env",
 )
+LOCAI_CONFIG_PATH = Path.home() / ".config/locai/config.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,8 +42,10 @@ class Settings:
     notion_meetings_db_id: str
     discord_blockers_channel_id: int
     discord_announcements_channel_id: int
-    ollama_base_url: str
-    ollama_model: str
+    llm_base_url: str
+    llm_model: str
+    llm_api_key: str
+    llm_api_style: str
 
 
 def configure_logging() -> None:
@@ -58,6 +62,44 @@ def load_environment() -> Path | None:
             load_dotenv(env_path)
             return env_path
     return None
+
+
+def default_llm_settings() -> tuple[str, str, str, str]:
+    explicit_base_url = os.getenv("LLM_BASE_URL", "").strip()
+    explicit_model = os.getenv("LLM_MODEL", "").strip()
+    explicit_api_key = os.getenv("LLM_API_KEY", "").strip()
+    explicit_api_style = os.getenv("LLM_API_STYLE", "").strip().lower()
+
+    legacy_base_url = os.getenv("OLLAMA_BASE_URL", "").strip()
+    legacy_model = os.getenv("OLLAMA_MODEL", "").strip()
+    locai_api_key = os.getenv("LOCAI_API_KEY", "").strip()
+
+    locai_base_url = ""
+    if LOCAI_CONFIG_PATH.exists():
+        try:
+            payload = json.loads(LOCAI_CONFIG_PATH.read_text(encoding="utf-8"))
+            settings = payload.get("settings", {})
+            public_host = str(settings.get("public_host") or "").strip()
+            public_port = settings.get("public_port")
+            if public_host and public_port:
+                locai_base_url = f"http://{public_host}:{public_port}/v1"
+        except Exception:  # noqa: BLE001
+            LOGGER.warning("Unable to parse locai config at %s", LOCAI_CONFIG_PATH)
+
+    base_url = explicit_base_url or legacy_base_url or locai_base_url or "http://127.0.0.1:11434"
+    model = explicit_model or legacy_model or ("qwen-32B" if locai_base_url else "qwen2.5:32b")
+    api_key = explicit_api_key or locai_api_key
+
+    if explicit_api_style in {"openai", "ollama"}:
+        api_style = explicit_api_style
+    elif explicit_base_url or locai_base_url:
+        api_style = "openai" if "/v1" in base_url or ":18080" in base_url else "ollama"
+    elif legacy_base_url or legacy_model:
+        api_style = "ollama"
+    else:
+        api_style = "openai" if locai_base_url else "ollama"
+
+    return base_url, model, api_key, api_style
 
 
 def load_settings() -> Settings:
@@ -89,6 +131,7 @@ def load_settings() -> Settings:
 
     LOGGER.info("Loaded environment from %s", env_path)
     LOGGER.info("All required environment variables are present.")
+    llm_base_url, llm_model, llm_api_key, llm_api_style = default_llm_settings()
 
     return Settings(
         discord_token=required["DISCORD_TOKEN"],
@@ -102,8 +145,10 @@ def load_settings() -> Settings:
         notion_meetings_db_id=required["NOTION_MEETINGS_DB_ID"],
         discord_blockers_channel_id=int(required["DISCORD_BLOCKERS_CHANNEL_ID"]),
         discord_announcements_channel_id=int(required["DISCORD_ANNOUNCEMENTS_CHANNEL_ID"]),
-        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").strip() or "http://127.0.0.1:11434",
-        ollama_model=os.getenv("OLLAMA_MODEL", "qwen2.5:32b").strip() or "qwen2.5:32b",
+        llm_base_url=llm_base_url,
+        llm_model=llm_model,
+        llm_api_key=llm_api_key,
+        llm_api_style=llm_api_style,
     )
 
 
@@ -182,16 +227,26 @@ def main() -> None:
     notion.client.databases.retrieve(database_id=settings.notion_meetings_db_id)
     LOGGER.info("Startup checks passed: Notion databases are reachable.")
 
-    reflection = ReflectionService(model=settings.ollama_model, base_url=settings.ollama_base_url)
+    reflection = ReflectionService(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        api_key=settings.llm_api_key,
+        api_style=settings.llm_api_style,
+    )
     try:
         reflection.verify_startup()
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning(
-            "Ollama is unavailable at startup (%s). Bot will continue with degraded AI features.",
+            "Primary LLM backend is unavailable at startup (%s). Bot will continue with degraded AI features.",
             exc,
         )
     else:
-        LOGGER.info("Ollama client initialized with model %s at %s.", settings.ollama_model, settings.ollama_base_url)
+        LOGGER.info(
+            "LLM client initialized with model %s at %s using %s transport.",
+            settings.llm_model,
+            settings.llm_base_url,
+            settings.llm_api_style,
+        )
 
     bot = XCGradientOSBot(settings=settings, notion=notion, reflection=reflection)
     bot.run(settings.discord_token, log_handler=None)

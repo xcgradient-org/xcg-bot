@@ -67,7 +67,8 @@ class LoadSettingsTests(unittest.TestCase):
             "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
         }
         with patch.dict("os.environ", env, clear=True):
-            settings = main.load_settings()
+            with patch("main.default_llm_settings", return_value=("http://127.0.0.1:11434", "qwen2.5:32b", "", "ollama")):
+                settings = main.load_settings()
 
         self.assertEqual(settings.notion_tasks_db_id, "tasks-db")
         self.assertEqual(settings.notion_daily_logs_db_id, "daily-db")
@@ -78,37 +79,98 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.discord_user_id_adam, 333)
         self.assertEqual(settings.discord_blockers_channel_id, 123)
         self.assertEqual(settings.discord_announcements_channel_id, 456)
-        self.assertEqual(settings.ollama_base_url, "http://127.0.0.1:11434")
-        self.assertEqual(settings.ollama_model, "qwen2.5:32b")
+        self.assertEqual(settings.llm_base_url, "http://127.0.0.1:11434")
+        self.assertEqual(settings.llm_model, "qwen2.5:32b")
+        self.assertEqual(settings.llm_api_key, "")
+        self.assertEqual(settings.llm_api_style, "ollama")
+
+    def test_default_llm_settings_prefers_locai_when_available(self) -> None:
+        locai_payload = {
+            "settings": {
+                "public_host": "100.72.248.102",
+                "public_port": 18080,
+            }
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "config.json"
+            config_path.write_text(main.json.dumps(locai_payload), encoding="utf-8")
+            with patch.object(main, "LOCAI_CONFIG_PATH", config_path):
+                with patch.dict("os.environ", {}, clear=True):
+                    base_url, model, api_key, api_style = main.default_llm_settings()
+
+        self.assertEqual(base_url, "http://100.72.248.102:18080/v1")
+        self.assertEqual(model, "qwen-32B")
+        self.assertEqual(api_key, "")
+        self.assertEqual(api_style, "openai")
+
+    def test_default_llm_settings_uses_locai_api_key_and_llm_overrides(self) -> None:
+        with patch.object(main, "LOCAI_CONFIG_PATH", Path("/tmp/missing-locai.json")):
+            with patch.dict(
+                "os.environ",
+                {
+                    "LLM_BASE_URL": "http://127.0.0.1:18080/v1",
+                    "LLM_MODEL": "code-qwen-80B",
+                    "LOCAI_API_KEY": "secret-key",
+                    "LLM_API_STYLE": "openai",
+                },
+                clear=True,
+            ):
+                base_url, model, api_key, api_style = main.default_llm_settings()
+
+        self.assertEqual(base_url, "http://127.0.0.1:18080/v1")
+        self.assertEqual(model, "code-qwen-80B")
+        self.assertEqual(api_key, "secret-key")
+        self.assertEqual(api_style, "openai")
 
 
 class ReflectionServiceTests(unittest.TestCase):
     def test_extract_text_returns_first_non_empty_part(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
         payload = {"response": "first answer"}
         self.assertEqual(service._extract_text(payload), "first answer")
 
+    def test_extract_text_supports_openai_chat_payload(self) -> None:
+        service = reflection.ReflectionService(model="qwen-32B", api_style="openai")
+        payload = {"choices": [{"message": {"content": "chat answer"}}]}
+        self.assertEqual(service._extract_text(payload), "chat answer")
+
     def test_verify_startup_accepts_installed_model(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
         with patch.object(service, "_get_json", return_value={"models": [{"name": "qwen2.5:32b"}]}) as get_json:
             service.verify_startup()
         get_json.assert_called_once_with("/api/tags")
 
     def test_verify_startup_raises_if_model_missing(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
         with patch.object(service, "_get_json", return_value={"models": [{"name": "llama3.1:8b"}]}):
             with self.assertRaisesRegex(RuntimeError, "not installed"):
                 service.verify_startup()
 
+    def test_verify_startup_accepts_openai_compatible_model(self) -> None:
+        service = reflection.ReflectionService(model="qwen-32B", api_style="openai")
+        with patch.object(service, "_get_json", return_value={"data": [{"id": "qwen-32B"}]}) as get_json:
+            service.verify_startup()
+        get_json.assert_called_once_with("/models")
+
     def test_generate_json_response_parses_json_payload(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_ollama_request", return_value={"response": '{"ok": true, "count": 2}'}):
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
+        with patch.object(service, "_model_request", return_value={"response": '{"ok": true, "count": 2}'}):
             payload = service.generate_json_response(system_prompt="s", user_prompt="u")
         self.assertEqual(payload, {"ok": True, "count": 2})
 
+    def test_generate_json_response_extracts_json_from_chatty_model_output(self) -> None:
+        service = reflection.ReflectionService(model="code-qwen-80B", api_style="openai")
+        with patch.object(
+            service,
+            "_model_request",
+            return_value={"choices": [{"message": {"content": "Sure.\n```json\n{\"ok\": true}\n```"}}]},
+        ):
+            payload = service.generate_json_response(system_prompt="s", user_prompt="u")
+        self.assertEqual(payload, {"ok": True})
+
     def test_generate_reflection_raises_on_empty_response(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
-        with patch.object(service, "_ollama_request", return_value={"response": ""}):
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
+        with patch.object(service, "_model_request", return_value={"response": ""}):
             with patch.object(service, "_gemini_text", return_value=""):
                 with self.assertRaisesRegex(RuntimeError, "empty reflection"):
                     service.generate_reflection(
@@ -120,7 +182,7 @@ class ReflectionServiceTests(unittest.TestCase):
                     )
 
     def test_build_fallback_reflection_includes_tasks_and_notes(self) -> None:
-        service = reflection.ReflectionService(model="qwen2.5:32b")
+        service = reflection.ReflectionService(model="qwen2.5:32b", api_style="ollama")
 
         note = service.build_fallback_reflection(
             founder_name="Oriol",
@@ -307,6 +369,18 @@ class TaskCommandTests(unittest.TestCase):
 
         self.assertEqual(descriptions, ["draft investor update", "prepare demo script"])
 
+    def test_fallback_task_descriptions_keeps_single_feature_request_with_metric_list_together(self) -> None:
+        descriptions = task_command._fallback_task_descriptions(
+            "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput"
+        )
+
+        self.assertEqual(
+            descriptions,
+            [
+                "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput"
+            ],
+        )
+
     def test_parse_task_descriptions_uses_fallback_when_llm_returns_invalid_payload(self) -> None:
         reflection_service = MagicMock()
         reflection_service.generate_json_response.return_value = {"unexpected": []}
@@ -317,6 +391,34 @@ class TaskCommandTests(unittest.TestCase):
         )
 
         self.assertEqual(descriptions, ["draft investor update", "prepare demo script"])
+
+    def test_parse_task_descriptions_limits_over_split_llm_output_without_explicit_multi_task_request(self) -> None:
+        reflection_service = MagicMock()
+        reflection_service.generate_json_response.return_value = {
+            "tasks": [
+                {"description": "Build local AI CLI"},
+                {"description": "Show occupied VRAM"},
+                {"description": "Show available context window"},
+                {"description": "Show TTFT"},
+                {"description": "Show TTLT"},
+                {"description": "Show throughput"},
+            ]
+        }
+
+        descriptions = task_command._parse_task_descriptions(
+            reflection_service,
+            "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput",
+        )
+
+        self.assertEqual(
+            descriptions,
+            [
+                "Build local AI CLI",
+                "Show occupied VRAM",
+                "Show available context window",
+                "Show TTFT",
+            ],
+        )
 
 
 class NotionTaskCreationTests(unittest.TestCase):
