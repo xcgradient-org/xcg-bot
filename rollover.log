@@ -1,0 +1,8 @@
+2026-05-01 17:00:02,012 [ERROR] rollover: Rollover failed: Missing required environment variables: NOTION_SETTINGS_DB_ID
+Traceback (most recent call last):
+  File "/home/sterry/Desktop/xcgradient-org/xcg-bot/rollover.py", line 31, in main
+    settings = load_settings()
+               ^^^^^^^^^^^^^^^
+  File "/home/sterry/Desktop/xcgradient-org/xcg-bot/main.py", line 132, in load_settings
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+RuntimeError: Missing required environment variables: NOTION_SETTINGS_DB_ID

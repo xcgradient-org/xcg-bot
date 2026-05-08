@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -7,7 +8,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
-from streaks import MADRID_TZ, compute_updated_streak
+from streaks import MADRID_TZ, sync_founder_streak_from_daily_logs
 
 
 LOGGER = logging.getLogger("xcg_bot.log_command")
@@ -187,6 +188,76 @@ def _rewrite_blocker_message(
     )
 
 
+def _complete_log_sync(
+    state: _LogState,
+    task_pages: list[dict[str, Any]],
+    raw_notes: str,
+) -> tuple[int | None, list[dict[str, Any]] | None]:
+    founder_name = state.founder["name"]
+    founder_role = state.founder["role"]
+    ctx = state.ctx
+    original_ids = {task["id"] for task in state.completed_tasks}
+    selected_ids = {task["id"] for task in task_pages}
+
+    for task in state.candidate_tasks:
+        was_completed = task["id"] in original_ids
+        should_be_completed = task["id"] in selected_ids
+        if was_completed == should_be_completed:
+            continue
+        state.notion.set_task_completion(
+            task,
+            completed=should_be_completed,
+            today_iso=ctx.today_iso,
+        )
+
+    task_descriptions = state.notion.task_descriptions(task_pages)
+    try:
+        reflection_text = state.reflection.generate_reflection(
+            founder_name=founder_name,
+            founder_role=founder_role,
+            today_iso=ctx.today_iso,
+            completed_tasks=task_descriptions,
+            raw_notes=raw_notes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Reflection generation failed; using fallback note: %s", exc)
+        reflection_text = state.reflection.build_fallback_reflection(
+            founder_name=founder_name,
+            founder_role=founder_role,
+            today_iso=ctx.today_iso,
+            completed_tasks=task_descriptions,
+            raw_notes=raw_notes,
+        )
+
+    state.notion.create_daily_log(
+        founder_name=founder_name,
+        founder_role=founder_role,
+        week_code=ctx.week_code,
+        today_iso=ctx.today_iso,
+        completed_task_ids=state.notion.page_ids(task_pages),
+        notes_text=reflection_text,
+    )
+
+    new_current: int | None = None
+    if not hasattr(state.notion, "streaks_available") or state.notion.streaks_available():
+        try:
+            new_current, _new_best, _last_log_iso = sync_founder_streak_from_daily_logs(
+                state.notion,
+                founder_name,
+                today=datetime.fromisoformat(ctx.today_iso).date(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Streak sync failed after log save for %s: %s", founder_name, exc)
+
+    remaining_tasks: list[dict[str, Any]] | None = None
+    try:
+        remaining_tasks = state.notion.query_remaining_tasks(founder_role, ctx.week_code, founder_name)
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Remaining-task lookup failed after log save for %s: %s", founder_name, exc)
+
+    return new_current, remaining_tasks
+
+
 # ---------------------------------------------------------------------------
 # Shared post-submit logic
 # ---------------------------------------------------------------------------
@@ -199,64 +270,14 @@ async def _finalize_log(
     blocker: dict[str, str] | None = None,
 ) -> None:
     founder_name = state.founder["name"]
-    founder_role = state.founder["role"]
     ctx = state.ctx
-    original_ids = {task["id"] for task in state.completed_tasks}
-    selected_ids = {task["id"] for task in task_pages}
 
     try:
-        for task in state.candidate_tasks:
-            was_completed = task["id"] in original_ids
-            should_be_completed = task["id"] in selected_ids
-            if was_completed == should_be_completed:
-                continue
-            state.notion.set_task_completion(
-                task,
-                completed=should_be_completed,
-                today_iso=ctx.today_iso,
-            )
-
-        remaining_tasks = state.notion.query_remaining_tasks(founder_role, ctx.week_code)
-        task_descriptions = state.notion.task_descriptions(task_pages)
-        try:
-            reflection_text = state.reflection.generate_reflection(
-                founder_name=founder_name,
-                founder_role=founder_role,
-                today_iso=ctx.today_iso,
-                completed_tasks=task_descriptions,
-                raw_notes=raw_notes,
-            )
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.warning("Reflection generation failed; using fallback note: %s", exc)
-            reflection_text = state.reflection.build_fallback_reflection(
-                founder_name=founder_name,
-                founder_role=founder_role,
-                today_iso=ctx.today_iso,
-                completed_tasks=task_descriptions,
-                raw_notes=raw_notes,
-            )
-        state.notion.create_daily_log(
-            founder_name=founder_name,
-            founder_role=founder_role,
-            week_code=ctx.week_code,
-            today_iso=ctx.today_iso,
-            completed_task_ids=state.notion.page_ids(task_pages),
-            notes_text=reflection_text,
-        )
-
-        streak_row = state.notion.get_streak_row(founder_name)
-        current_streak, best_streak, last_log_iso = state.notion.streak_values(streak_row)
-        new_current, new_best = compute_updated_streak(
-            last_log_iso=last_log_iso,
-            current_streak=current_streak,
-            best_streak=best_streak,
-            today=datetime.fromisoformat(ctx.today_iso).date(),
-        )
-        state.notion.update_streak_row(
-            streak_row["id"],
-            current_streak=new_current,
-            best_streak=new_best if new_best != best_streak else None,
-            last_log_iso=ctx.today_iso,
+        new_current, remaining_tasks = await asyncio.to_thread(
+            _complete_log_sync,
+            state,
+            task_pages,
+            raw_notes,
         )
     except Exception as exc:  # noqa: BLE001
         LOGGER.exception("Log flow failed for %s: %s", founder_name, exc)
@@ -266,7 +287,8 @@ async def _finalize_log(
     blockers_posted = 0
     if blocker is not None:
         try:
-            final_message = _rewrite_blocker_message(
+            final_message = await asyncio.to_thread(
+                _rewrite_blocker_message,
                 state,
                 task_pages,
                 target_role=blocker["target_role"],
@@ -282,16 +304,26 @@ async def _finalize_log(
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to post blocker for %s: %s", founder_name, exc)
 
-    blocker_suffix = f" Blockers posted: {blockers_posted}." if blockers_posted else ""
-    await interaction.followup.send(
-        "✅ Log saved. "
-        f"Tasks done today: {len(task_pages)}. Remaining this week: {len(remaining_tasks)}.{blocker_suffix}",
-        ephemeral=True,
-    )
+    parts = [
+        "✅ Log saved.",
+        f"Tasks done today: {len(task_pages)}.",
+    ]
+    if remaining_tasks is None:
+        parts.append("Remaining this week: unavailable.")
+    else:
+        parts.append(f"Remaining this week: {len(remaining_tasks)}.")
+    if blockers_posted:
+        parts.append(f"Blockers posted: {blockers_posted}.")
+    if new_current is None:
+        parts.append("Streak refresh is temporarily unavailable.")
+    await interaction.followup.send(" ".join(parts), ephemeral=True)
 
     if interaction.channel is not None:
         try:
-            await interaction.channel.send(f"✅ {founder_name} logged · 🔥 Streak: {new_current}")
+            if new_current is None:
+                await interaction.channel.send(f"✅ {founder_name} logged")
+            else:
+                await interaction.channel.send(f"✅ {founder_name} logged · 🔥 Streak: {new_current}")
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to post public confirmation: %s", exc)
 
@@ -488,13 +520,24 @@ def register_log_command(bot, tree: app_commands.CommandTree, notion, reflection
 
         ctx = current_context()
         try:
-            if notion.has_daily_log(founder["name"], ctx.today_iso):
+            already_logged = await asyncio.to_thread(
+                notion.has_daily_log,
+                founder["name"],
+                ctx.today_iso,
+            )
+            if already_logged:
                 await interaction.followup.send(
                     f"You already logged for {ctx.today_iso}. `/log` is limited to once per business day, with the day rolling over at 05:00 Madrid time.",
                     ephemeral=True,
                 )
                 return
-            candidate_tasks, completed_tasks, active_week = notion.query_log_tasks(founder["role"], ctx.today_iso, ctx.week_code)
+            candidate_tasks, completed_tasks, active_week = await asyncio.to_thread(
+                notion.query_log_tasks,
+                founder["role"],
+                ctx.today_iso,
+                ctx.week_code,
+                founder["name"],
+            )
             ctx.week_code = active_week
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Failed to fetch completed tasks for %s: %s", founder["name"], exc)

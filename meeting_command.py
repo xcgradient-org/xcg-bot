@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta
@@ -8,7 +9,7 @@ import discord
 import pytz
 from discord import app_commands
 
-from meetings import _format_message, _send_announcement
+from meetings import _flag_properties, _format_message, _send_announcement
 
 
 LOGGER = logging.getLogger("xcg_bot.meeting_command")
@@ -253,6 +254,13 @@ def _normalize_payload(raw_input: dict, ai_payload: dict | None) -> dict:
     }
 
 
+def _mode_for_location(location: str) -> str:
+    normalized = location.strip().lower()
+    if normalized in {"in person", "in-person"}:
+        return "In-person"
+    return "Online"
+
+
 def _format_datetime(date_iso: str) -> str:
     parsed = datetime.fromisoformat(_normalize_date_iso(date_iso))
     return f"{WEEKDAYS[parsed.weekday()]} {parsed.day} {MONTHS[parsed.month - 1]}, {parsed.strftime('%H:%M')}"
@@ -323,7 +331,8 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
 
         ai_payload = None
         try:
-            ai_payload = self.reflection.generate_json_response(
+            ai_payload = await asyncio.to_thread(
+                self.reflection.generate_json_response,
                 system_prompt=SYSTEM_PROMPT,
                 user_prompt=(
                     f"Today is: {WEEKDAYS[now.weekday()]} {today_iso}\n"
@@ -342,22 +351,82 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
         payload = _normalize_payload(raw_input, ai_payload)
 
         try:
-            parent = {"database_id": self.settings.notion_meetings_db_id}
-            if hasattr(self.notion.client, "data_sources"):
-                parent = {"data_source_id": self.notion.primary_data_source_id(self.settings.notion_meetings_db_id)}
-            created_page = self.notion.client.pages.create(
-                parent=parent,
-                properties={
-                    "Title": {"title": [{"type": "text", "text": {"content": payload["title"]}}]},
-                    "Date": {"date": {"start": payload["date_iso"]}},
-                    "Type": {"select": {"name": payload["type"]}},
-                    "Attendees": {"multi_select": [{"name": attendee} for attendee in payload["attendees"]]},
-                    "Location": {"rich_text": [{"type": "text", "text": {"content": payload["location"]}}]},
-                    "Notes": {"rich_text": [{"type": "text", "text": {"content": payload["notes_enhanced"]}}]} if payload["notes_enhanced"] else {"rich_text": []},
-                    "Announced": {"checkbox": False},
-                    "Reminded": {"checkbox": False},
-                },
-            )
+            def _create_meeting_sync() -> dict[str, Any]:
+                schema = self.notion._retrieve_schema(self.settings.notion_meetings_db_id)
+                properties: dict[str, Any] = {}
+
+                title_name = self.notion._title_property_name(schema)
+                properties[title_name] = {"title": [{"type": "text", "text": {"content": payload["title"]}}]}
+
+                date_prop_name = self.notion._existing_property_name(schema, "Date")
+                if date_prop_name:
+                    properties[date_prop_name] = {"date": {"start": payload["date_iso"]}}
+
+                type_prop_name = self.notion._existing_property_name(schema, "Type")
+                if type_prop_name:
+                    type_prop = schema[type_prop_name]
+                    if type_prop.get("type") in {"select", "status"}:
+                        properties[type_prop_name] = self.notion._build_named_option_value(type_prop, payload["type"])
+                    else:
+                        properties[type_prop_name] = self.notion._build_text_like_property_value(type_prop, payload["type"])
+
+                attendees_prop_name = self.notion._existing_property_name(schema, "Attendees")
+                if attendees_prop_name:
+                    attendees_prop = schema[attendees_prop_name]
+                    prop_type = attendees_prop.get("type")
+                    if prop_type == "multi_select":
+                        properties[attendees_prop_name] = {"multi_select": [{"name": attendee} for attendee in payload["attendees"]]}
+                    else:
+                        attendee_text = ", ".join(payload["attendees"])
+                        properties[attendees_prop_name] = self.notion._build_text_like_property_value(attendees_prop, attendee_text)
+
+                mode_prop_name = self.notion._existing_property_name(schema, "Mode")
+                if mode_prop_name:
+                    mode_prop = schema[mode_prop_name]
+                    if mode_prop.get("type") in {"select", "status"}:
+                        properties[mode_prop_name] = self.notion._build_named_option_value(
+                            mode_prop,
+                            self.notion._resolve_option_name(mode_prop, preferred_values=[_mode_for_location(payload["location"])]),
+                        )
+                    else:
+                        properties[mode_prop_name] = self.notion._build_text_like_property_value(
+                            mode_prop,
+                            _mode_for_location(payload["location"]),
+                        )
+
+                location_prop_name = self.notion._existing_property_name(schema, "Location")
+                if location_prop_name:
+                    properties[location_prop_name] = self.notion._build_text_like_property_value(schema[location_prop_name], payload["location"])
+
+                notes_prop_name = self.notion._existing_property_name(schema, "Notes")
+                if notes_prop_name:
+                    notes_prop = schema[notes_prop_name]
+                    if payload["notes_enhanced"] or notes_prop.get("type") == "rich_text":
+                        properties[notes_prop_name] = self.notion._build_text_like_property_value(notes_prop, payload["notes_enhanced"])
+
+                announced_prop_name = self.notion._existing_property_name(schema, "Announced")
+                if announced_prop_name:
+                    properties[announced_prop_name] = {"checkbox": False}
+
+                reminded_prop_name = self.notion._existing_property_name(schema, "Reminded")
+                if reminded_prop_name:
+                    properties[reminded_prop_name] = {"checkbox": False}
+
+                status_prop_name = self.notion._existing_property_name(schema, "Status")
+                if status_prop_name:
+                    status_prop = schema[status_prop_name]
+                    if status_prop.get("type") in {"select", "status"}:
+                        properties[status_prop_name] = self.notion._build_named_option_value(
+                            status_prop,
+                            self.notion._resolve_option_name(status_prop, preferred_values=["Pending", "To Do", "Todo"]),
+                        )
+
+                return self.notion.client.pages.create(
+                    parent=self.notion._build_parent(self.settings.notion_meetings_db_id),
+                    properties=properties,
+                )
+
+            created_page = await asyncio.to_thread(_create_meeting_sync)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Meeting creation failed: %s", exc)
             await interaction.followup.send(f"I couldn't create the meeting in Notion: {exc}", ephemeral=True)
@@ -368,9 +437,10 @@ class MeetingModal(discord.ui.Modal, title="Create Meeting"):
             prefix = f"📅 {mentions} New meeting scheduled!" if mentions else "📅 New meeting scheduled!"
             content = _format_message(prefix, created_page)
             await _send_announcement(interaction.client, self.settings.discord_announcements_channel_id, content)
-            self.notion.client.pages.update(
+            await asyncio.to_thread(
+                self.notion.client.pages.update,
                 page_id=created_page["id"],
-                properties={"Announced": {"checkbox": True}},
+                properties=_flag_properties(created_page, "Announced", True),
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Immediate meeting announcement failed: %s", exc)

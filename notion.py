@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from notion_client import Client
@@ -8,46 +10,106 @@ from notion_client import Client
 
 LOGGER = logging.getLogger("xcg_bot.notion")
 DONE_NAMES = {"done", "complete", "completed"}
+ARCHIVED_NAMES = {"archived", "archive"}
+UNSET = object()
+PROPERTY_ALIASES = {
+    "Announced": ("Announced", "Posted", "Sent", "Broadcasted"),
+    "Attendees": ("Attendees", "People", "Owners", "Founder"),
+    "Best Streak": ("Best Streak", "Longest Streak", "Max Streak"),
+    "Created on": ("Created on", "Created On", "Created"),
+    "Current Streak": ("Current Streak", "Streak"),
+    "Current Week": ("Current Week", "Current Sprint"),
+    "Date": ("Date", "When", "Log Date", "Meeting Date"),
+    "Description": ("Description", "Task", "Details", "Summary"),
+    "Display ID": ("Display ID", "Task ID", "ID", "Name", "Title"),
+    "Done date": ("Done date", "Completed on", "Completed date", "Done on"),
+    "Founder": ("Founder", "Founders", "Owner", "Owners", "Person", "People"),
+    "Is Current Week": ("Is Current Week", "In Current Week"),
+    "Last Log": ("Last Log", "Last Logged", "Last Activity"),
+    "Last Rollover Moved Count": ("Last Rollover Moved Count", "Rollover Moved Count", "Moved Count"),
+    "Last Rollover Run": ("Last Rollover Run", "Rollover Run"),
+    "Last Rollover Status": ("Last Rollover Status", "Rollover Status"),
+    "Location": ("Location", "Place", "Address"),
+    "Month": ("Month",),
+    "Notes": ("Notes", "Context", "Summary", "Overview", "TL;DR", "TLDR"),
+    "Project": ("Project", "Projects"),
+    "Projects": ("Projects", "Project"),
+    "Quarter": ("Quarter",),
+    "Reminded": ("Reminded", "Reminder sent", "Reminder posted"),
+    "Role": ("Role", "Function"),
+    "Sprint week": ("Sprint week", "Sprint Week"),
+    "Status": ("Status", "Done", "Completed", "State"),
+    "Tasks completed": ("Tasks completed", "Completed tasks", "Tasks done", "Done tasks", "Tasks"),
+    "Title": ("Title", "Name"),
+    "Type": ("Type", "Meeting Type", "Category"),
+    "Week": ("Week", "Sprint week", "Sprint Week"),
+    "Year": ("Year",),
+}
 
 
 class NotionService:
-    def __init__(self, *, token: str, tasks_db_id: str, daily_logs_db_id: str, streaks_db_id: str) -> None:
+    def __init__(self, *, token: str, tasks_db_id: str, daily_logs_db_id: str, streaks_db_id: str, settings_db_id: str | None = None) -> None:
         self.client = Client(auth=token)
         self.tasks_db_id = tasks_db_id
         self.daily_logs_db_id = daily_logs_db_id
         self.streaks_db_id = streaks_db_id
+        self.settings_db_id = settings_db_id
+        self._streaks_available = True
 
     def verify_startup(self) -> None:
         try:
             self.client.databases.retrieve(database_id=self.tasks_db_id)
             self.client.databases.retrieve(database_id=self.daily_logs_db_id)
-            self.client.databases.retrieve(database_id=self.streaks_db_id)
+            if self.settings_db_id:
+                self.client.databases.retrieve(database_id=self.settings_db_id)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Unable to reach required Notion databases: {exc}") from exc
 
-    def query_remaining_tasks(self, role: str, week_code: str) -> list[dict[str, Any]]:
+        try:
+            self._query_all(self.streaks_db_id)
+        except Exception as exc:  # noqa: BLE001
+            self._streaks_available = False
+            LOGGER.warning("Streaks database is unavailable; streak maintenance is disabled: %s", exc)
+        else:
+            self._streaks_available = True
+
+    def streaks_available(self) -> bool:
+        return self._streaks_available
+
+    def query_remaining_tasks(self, role: str, week_code: str, founder_name: str | None = None) -> list[dict[str, Any]]:
         try:
             tasks = self._query_all(self.tasks_db_id)
             return [
                 task
                 for task in tasks
-                if self._property_text(task, "Role") == role
+                if self._task_matches_founder(task, role=role, founder_name=founder_name)
                 and not self._is_task_done(task)
-                and self._property_text(task, "Week") == week_code
+                and not self._is_task_archived(task)
+                and self._task_matches_week(task, week_code)
             ]
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query remaining tasks: {exc}") from exc
 
-    def query_log_tasks(self, role: str, today_iso: str, week_code: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    def query_log_tasks(
+        self,
+        role: str,
+        today_iso: str,
+        week_code: str,
+        founder_name: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
         try:
             tasks = self._query_all(self.tasks_db_id)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query log tasks: {exc}") from exc
 
-        role_tasks = [task for task in tasks if self._property_text(task, "Role") == role]
+        role_tasks = [
+            task
+            for task in tasks
+            if self._task_matches_founder(task, role=role, founder_name=founder_name)
+        ]
         active_week = self._resolve_active_week(role_tasks, preferred_week=week_code)
         if active_week:
-            candidates = [task for task in role_tasks if self._property_text(task, "Week") == active_week]
+            candidates = [task for task in role_tasks if self._task_matches_week(task, active_week)]
         else:
             candidates = list(role_tasks)
 
@@ -63,7 +125,7 @@ class NotionService:
             and self._property_date(task, "Done date")
             and task["id"] not in done_today_ids
         }
-        candidates = [task for task in candidates if task["id"] not in done_other_day_ids]
+        candidates = [task for task in candidates if task["id"] not in done_other_day_ids and not self._is_task_archived(task)]
         legacy_done_ids: set[str] = set()
         if not done_today_ids:
             legacy_done_ids = {
@@ -97,15 +159,41 @@ class NotionService:
         completed_task_ids: list[str],
         notes_text: str,
     ) -> dict[str, Any]:
-        properties = {
-            "Title": {"title": [{"type": "text", "text": {"content": f"{founder_name} · {week_code} · {today_iso}"}}]},
-            "Date": {"date": {"start": today_iso}},
-            "Founder": {"select": {"name": founder_name}},
-            "Role": {"select": {"name": founder_role}},
-            "Week": {"select": {"name": week_code}},
-            "Tasks completed": {"relation": [{"id": page_id} for page_id in completed_task_ids]},
-            "Notes": {"rich_text": self._rich_text(notes_text)},
-        }
+        schema = self._retrieve_schema(self.daily_logs_db_id)
+        properties: dict[str, Any] = {}
+
+        title_name = self._title_property_name(schema)
+        properties[title_name] = {"title": [{"type": "text", "text": {"content": f"{founder_name} · {week_code} · {today_iso}"}}]}
+
+        if prop := self._get_schema_property(schema, "Date"):
+            properties[self._property_name(prop, "Date")] = {"date": {"start": today_iso}}
+
+        used_names = {title_name}
+
+        founder_prop_name = self._existing_property_name(schema, "Founder")
+        if founder_prop_name:
+            used_names.add(founder_prop_name)
+            properties[founder_prop_name] = self._build_text_like_property_value(schema[founder_prop_name], founder_name)
+
+        role_prop_name = self._existing_property_name(schema, "Role")
+        if role_prop_name and role_prop_name not in used_names:
+            used_names.add(role_prop_name)
+            properties[role_prop_name] = self._build_text_like_property_value(schema[role_prop_name], founder_role)
+
+        week_prop_name = self._existing_property_name(schema, "Week")
+        if week_prop_name and week_prop_name not in used_names:
+            used_names.add(week_prop_name)
+            properties[week_prop_name] = self._build_scalar_property_value(schema[week_prop_name], week_code)
+
+        tasks_prop_name = self._existing_property_name(schema, "Tasks completed")
+        if tasks_prop_name and tasks_prop_name not in used_names:
+            used_names.add(tasks_prop_name)
+            properties[tasks_prop_name] = {"relation": [{"id": page_id} for page_id in completed_task_ids]}
+
+        notes_prop_name = self._existing_property_name(schema, "Notes")
+        if notes_prop_name and notes_prop_name not in used_names:
+            properties[notes_prop_name] = {"rich_text": self._rich_text(notes_text)}
+
         try:
             return self.client.pages.create(
                 parent=self._build_parent(self.daily_logs_db_id),
@@ -120,10 +208,26 @@ class NotionService:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query daily logs: {exc}") from exc
         return any(
-            self._property_text(row, "Founder") == founder_name
+            self._daily_log_founder_value(row) == founder_name
             and self._date_matches_day(row, "Date", today_iso)
             for row in rows
         )
+
+    def daily_log_dates(self, founder_name: str) -> list[date]:
+        try:
+            rows = self._query_all(self.daily_logs_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query daily logs: {exc}") from exc
+
+        dates: list[date] = []
+        for row in rows:
+            if self._daily_log_founder_value(row) != founder_name:
+                continue
+            value = self._property_date(row, "Date")
+            if not value:
+                continue
+            dates.append(date.fromisoformat(value[:10]))
+        return dates
 
     def get_streak_row(self, founder_name: str) -> dict[str, Any]:
         try:
@@ -131,7 +235,7 @@ class NotionService:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query streak rows: {exc}") from exc
 
-        matches = [row for row in rows if self._property_text(row, "Founder") == founder_name]
+        matches = [row for row in rows if self._founder_matches_row(row, founder_name)]
         if not matches:
             raise RuntimeError(f"No streak row found for founder {founder_name}.")
         if len(matches) > 1:
@@ -150,15 +254,20 @@ class NotionService:
         *,
         current_streak: int,
         best_streak: int | None,
-        last_log_iso: str | None = None,
+        last_log_iso: str | None | object = UNSET,
     ) -> None:
-        properties: dict[str, Any] = {
-            "Current Streak": {"number": current_streak},
-        }
-        if last_log_iso is not None:
-            properties["Last Log"] = {"date": {"start": last_log_iso}}
+        schema = self._retrieve_schema(self.streaks_db_id)
+        properties: dict[str, Any] = {}
+
+        current_prop_name = self._existing_property_name(schema, "Current Streak") or "Current Streak"
+        properties[current_prop_name] = {"number": current_streak}
+
+        if last_log_iso is not UNSET:
+            last_log_prop_name = self._existing_property_name(schema, "Last Log") or "Last Log"
+            properties[last_log_prop_name] = {"date": {"start": last_log_iso} if last_log_iso else None}
         if best_streak is not None:
-            properties["Best Streak"] = {"number": best_streak}
+            best_prop_name = self._existing_property_name(schema, "Best Streak") or "Best Streak"
+            properties[best_prop_name] = {"number": best_streak}
 
         try:
             self.client.pages.update(page_id=row_id, properties=properties)
@@ -174,10 +283,10 @@ class NotionService:
         return descriptions
 
     def task_description(self, task: dict[str, Any]) -> str:
-        return self._property_text(task, "Description") or self._property_text(task, "Display ID") or "Untitled task"
+        return self._property_text(task, "Description") or self.task_display_id(task) or "Untitled task"
 
     def task_display_id(self, task: dict[str, Any]) -> str:
-        return self._property_text(task, "Display ID")
+        return self._property_text(task, "Display ID") or self._page_title(task)
 
     def page_ids(self, pages: list[dict[str, Any]]) -> list[str]:
         return [page["id"] for page in pages]
@@ -192,32 +301,50 @@ class NotionService:
         return self._property_text(row, "Founder")
 
     def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
-        status_prop = task.get("properties", {}).get("Status", {})
-        prop_type = status_prop.get("type")
         db_schema = self._retrieve_schema(self.tasks_db_id)
-        schema_status = db_schema.get("Status", {})
-        if not prop_type:
-            prop_type = schema_status.get("type")
-
-        properties: dict[str, Any] = {}
-        if prop_type == "checkbox":
-            properties["Status"] = {"checkbox": completed}
-        elif prop_type == "status":
-            properties["Status"] = {"status": {"name": self._resolve_status_name(schema_status, completed=completed)}}
-        elif prop_type == "select":
-            properties["Status"] = {"select": {"name": self._resolve_status_name(schema_status, completed=completed)}}
-        else:
-            raise RuntimeError("Tasks database is missing a supported Status property.")
-
-        if completed:
-            properties["Done date"] = {"date": {"start": today_iso}}
-        else:
-            properties["Done date"] = {"date": None}
-
+        properties = self._task_completion_properties(task, db_schema, completed=completed, today_iso=today_iso)
         try:
             self.client.pages.update(page_id=task["id"], properties=properties)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to update task completion for {task['id']}: {exc}") from exc
+
+    def _task_completion_properties(
+        self,
+        task: dict[str, Any],
+        db_schema: dict[str, Any],
+        *,
+        completed: bool,
+        today_iso: str,
+    ) -> dict[str, Any]:
+        status_prop = self._property(task, "Status")
+        prop_type = status_prop.get("type")
+        status_prop_name = self._existing_property_name(db_schema, "Status")
+        schema_status = db_schema.get(status_prop_name or "", {})
+        if not prop_type:
+            prop_type = schema_status.get("type")
+
+        properties: dict[str, Any] = {}
+        status_target_name = status_prop_name or "Status"
+        if prop_type == "checkbox":
+            properties[status_target_name] = {"checkbox": completed}
+        elif prop_type == "status":
+            properties[status_target_name] = {"status": {"name": self._resolve_status_name(schema_status, completed=completed)}}
+        elif prop_type == "select":
+            properties[status_target_name] = {"select": {"name": self._resolve_status_name(schema_status, completed=completed)}}
+        else:
+            raise RuntimeError("Tasks database is missing a supported Status property.")
+
+        done_checkbox_name = self._existing_property_name(db_schema, "Done")
+        if done_checkbox_name and done_checkbox_name != status_target_name and db_schema[done_checkbox_name].get("type") == "checkbox":
+            properties[done_checkbox_name] = {"checkbox": completed}
+
+        done_date_prop_name = self._existing_property_name(db_schema, "Done date") or "Done date"
+        if completed:
+            properties[done_date_prop_name] = {"date": {"start": today_iso}}
+        else:
+            properties[done_date_prop_name] = {"date": None}
+
+        return properties
 
     def list_projects(self) -> list[dict[str, str]]:
         schema = self._retrieve_schema(self.tasks_db_id)
@@ -275,6 +402,7 @@ class NotionService:
         project_id: str,
         project_name: str,
         role: str,
+        founder_name: str | None = None,
         descriptions: list[str],
         year: int,
         quarter_name: str,
@@ -301,6 +429,7 @@ class NotionService:
                 display_id=display_id,
                 description=description,
                 role=role,
+                founder_name=founder_name,
                 project_id=project_id,
                 year=year,
                 quarter_name=quarter_name,
@@ -408,7 +537,7 @@ class NotionService:
         return {"database_id": database_id}
 
     def _is_task_done(self, page: dict[str, Any]) -> bool:
-        prop = page.get("properties", {}).get("Status")
+        prop = self._property(page, "Status")
         if not prop:
             return False
 
@@ -417,14 +546,41 @@ class NotionService:
             return bool(prop.get("checkbox"))
         if prop_type == "status":
             status = (prop.get("status") or {}).get("name", "").strip().lower()
-            return status in DONE_NAMES
+            if status in DONE_NAMES:
+                return True
         if prop_type == "select":
             status = (prop.get("select") or {}).get("name", "").strip().lower()
-            return status in DONE_NAMES
+            if status in DONE_NAMES:
+                return True
+
+        done_prop = self._property(page, "Done")
+        if done_prop and done_prop is not prop and done_prop.get("type") == "checkbox":
+            return bool(done_prop.get("checkbox"))
         return False
 
-    def _property_text(self, page: dict[str, Any], property_name: str) -> str:
-        prop = page.get("properties", {}).get(property_name, {})
+    def _is_task_archived(self, page: dict[str, Any]) -> bool:
+        prop = self._property(page, "Status")
+        prop_type = prop.get("type")
+        if prop_type == "status":
+            status = (prop.get("status") or {}).get("name", "").strip().lower()
+            return status in ARCHIVED_NAMES
+        if prop_type == "select":
+            status = (prop.get("select") or {}).get("name", "").strip().lower()
+            return status in ARCHIVED_NAMES
+        return False
+
+    def _property(self, page: dict[str, Any], *candidate_names: str) -> dict[str, Any]:
+        properties = page.get("properties", {})
+        if not properties:
+            return {}
+
+        property_name = self._existing_property_name(properties, *candidate_names)
+        if property_name is None:
+            return {}
+        return properties.get(property_name, {})
+
+    def _property_text(self, page: dict[str, Any], *candidate_names: str) -> str:
+        prop = self._property(page, *candidate_names)
         prop_type = prop.get("type")
 
         if prop_type == "title":
@@ -435,24 +591,33 @@ class NotionService:
             return (prop.get("select") or {}).get("name", "").strip()
         if prop_type == "status":
             return (prop.get("status") or {}).get("name", "").strip()
+        if prop_type == "multi_select":
+            return ", ".join(item.get("name", "").strip() for item in prop.get("multi_select", []) if item.get("name"))
+        if prop_type == "people":
+            return ", ".join(item.get("name", "").strip() for item in prop.get("people", []) if item.get("name"))
         if prop_type == "relation":
             return ",".join(item.get("id", "") for item in prop.get("relation", []))
         if prop_type == "date":
             return ((prop.get("date") or {}).get("start") or "").strip()
+        if prop_type == "number":
+            value = prop.get("number")
+            return "" if value is None else str(value)
+        if prop_type == "checkbox":
+            return "true" if prop.get("checkbox") else "false"
         return ""
 
-    def _property_date(self, page: dict[str, Any], property_name: str) -> str:
-        prop = page.get("properties", {}).get(property_name, {})
+    def _property_date(self, page: dict[str, Any], *candidate_names: str) -> str:
+        prop = self._property(page, *candidate_names)
         value = prop.get("date") or {}
         return (value.get("start") or "").strip()
 
-    def _property_number(self, page: dict[str, Any], property_name: str) -> int:
-        prop = page.get("properties", {}).get(property_name, {})
+    def _property_number(self, page: dict[str, Any], *candidate_names: str) -> int:
+        prop = self._property(page, *candidate_names)
         value = prop.get("number")
         return int(value or 0)
 
-    def _property_relation_ids(self, page: dict[str, Any], property_name: str) -> list[str]:
-        prop = page.get("properties", {}).get(property_name, {})
+    def _property_relation_ids(self, page: dict[str, Any], *candidate_names: str) -> list[str]:
+        prop = self._property(page, *candidate_names)
         relation = prop.get("relation") or []
         return [str(item.get("id", "")).strip() for item in relation if str(item.get("id", "")).strip()]
 
@@ -478,23 +643,20 @@ class NotionService:
         return bool(value) and value.startswith(day_iso)
 
     def _resolve_active_week(self, tasks: list[dict[str, Any]], *, preferred_week: str) -> str:
-        week_codes = {
-            self._property_text(task, "Week")
-            for task in tasks
-            if self._property_text(task, "Week")
-        }
-        if preferred_week in week_codes:
+        week_codes = {self._task_week_value(task) for task in tasks if self._task_week_value(task)}
+        if any(self._week_matches(value, preferred_week) for value in week_codes):
             return preferred_week
         if not week_codes:
             return preferred_week
-        return max(week_codes, key=self._week_sort_key)
+        latest = max(week_codes, key=self._week_sort_key)
+        return self._canonical_week_code(latest, fallback=preferred_week) or preferred_week
 
     def _week_sort_key(self, week_code: str) -> tuple[int, int]:
-        try:
-            year_text, week_text = week_code.split("-W", 1)
-            return int(year_text), int(week_text)
-        except Exception:  # noqa: BLE001
+        parsed = self._parse_week_code(week_code)
+        if parsed is None:
             return (-1, -1)
+        year, week = parsed
+        return (year if year is not None else -1, week)
 
     def _resolve_status_name(self, schema_status: dict[str, Any], *, completed: bool) -> str:
         prop_type = schema_status.get("type")
@@ -547,7 +709,7 @@ class NotionService:
             if norm_project_id not in norm_relation_ids:
                 continue
             # Parse the sequence number out of the Display ID.
-            display_id = self._property_text(task, "Display ID")
+            display_id = self.task_display_id(task)
             if prefix in display_id:
                 suffix = display_id.split(prefix, 1)[-1]
                 if suffix.isdigit():
@@ -568,6 +730,7 @@ class NotionService:
         display_id: str,
         description: str,
         role: str,
+        founder_name: str | None,
         project_id: str,
         year: int,
         quarter_name: str,
@@ -583,6 +746,9 @@ class NotionService:
         if prop := self._get_schema_property(schema, "Role"):
             prop_name = self._property_name(prop, "Role")
             properties[prop_name] = self._build_named_option_value(prop, role)
+        owner_prop_name = self._existing_property_name(schema, "Founder")
+        if founder_name and owner_prop_name and owner_prop_name not in properties:
+            properties[owner_prop_name] = self._build_text_like_property_value(schema[owner_prop_name], founder_name)
         if prop := self._get_schema_property(schema, "Project", "Projects"):
             prop_name = self._property_name(prop, "Project")
             properties[prop_name] = {"relation": [{"id": project_id}]}
@@ -621,6 +787,9 @@ class NotionService:
                     prop,
                     self._resolve_status_name(prop, completed=False),
                 )
+        done_prop_name = self._existing_property_name(schema, "Done")
+        if done_prop_name and done_prop_name not in properties and schema[done_prop_name].get("type") == "checkbox":
+            properties[done_prop_name] = {"checkbox": False}
         if prop := self._get_schema_property(schema, "Done date"):
             prop_name = self._property_name(prop, "Done date")
             properties[prop_name] = {"date": None}
@@ -636,9 +805,9 @@ class NotionService:
         return "Display ID"
 
     def _existing_property_name(self, schema: dict[str, Any], *candidate_names: str) -> str | None:
-        lowered = {name.lower(): name for name in schema}
-        for candidate in candidate_names:
-            match = lowered.get(candidate.lower())
+        normalized = {self._normalize_property_name(name): name for name in schema}
+        for candidate in self._candidate_property_names(*candidate_names):
+            match = normalized.get(self._normalize_property_name(candidate))
             if match:
                 return match
         return None
@@ -687,6 +856,22 @@ class NotionService:
             return {"status": {"name": option_name}}
         raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not support named options.")
 
+    def _build_text_like_property_value(self, schema_prop: dict[str, Any], value: str) -> dict[str, Any]:
+        prop_type = schema_prop.get("type")
+        if prop_type == "title":
+            return {"title": [{"type": "text", "text": {"content": value}}]}
+        if prop_type == "rich_text":
+            return {"rich_text": self._rich_text(value)}
+        if prop_type == "select":
+            return {"select": {"name": value}}
+        if prop_type == "status":
+            return {"status": {"name": value}}
+        if prop_type == "multi_select":
+            if not value:
+                return {"multi_select": []}
+            return {"multi_select": [{"name": value}]}
+        raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not support text-like values.")
+
     def _build_scalar_property_value(self, schema_prop: dict[str, Any], value: str) -> dict[str, Any]:
         prop_type = schema_prop.get("type")
         if prop_type == "select":
@@ -701,3 +886,254 @@ class NotionService:
             digits = "".join(char for char in value if char.isdigit())
             return {"number": int(digits)} if digits else {"number": None}
         raise RuntimeError(f"Property {schema_prop.get('name', 'unknown')} does not support scalar task values.")
+
+    def _candidate_property_names(self, *candidate_names: str) -> list[str]:
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidate_names:
+            options = PROPERTY_ALIASES.get(candidate, (candidate,))
+            for option in options:
+                normalized = self._normalize_property_name(option)
+                if normalized in seen:
+                    continue
+                seen.add(normalized)
+                resolved.append(option)
+        return resolved
+
+    def _normalize_property_name(self, value: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    def _task_owner_value(self, task: dict[str, Any]) -> str:
+        explicit_owner = (
+            self._property_text(task, "Role")
+            or self._property_text(task, "Founder")
+            or self._property_text(task, "Attendees")
+        )
+        if explicit_owner:
+            return explicit_owner
+
+        display_id = self.task_display_id(task)
+        match = re.search(r"-(CEO|CTO|COO)-\d+$", display_id, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+        return ""
+
+    def _task_matches_founder(self, task: dict[str, Any], *, role: str, founder_name: str | None = None) -> bool:
+        owner_value = self._task_owner_value(task)
+        if not owner_value:
+            return False
+
+        normalized_targets = {role.strip().lower()}
+        if founder_name:
+            normalized_targets.add(founder_name.strip().lower())
+
+        tokens = {
+            token.strip().lower()
+            for token in re.split(r"[,/]", owner_value)
+            if token.strip()
+        }
+        if owner_value.strip().lower() in normalized_targets:
+            return True
+        return bool(tokens & normalized_targets)
+
+    def _task_week_value(self, task: dict[str, Any]) -> str:
+        return self._property_text(task, "Week")
+
+    def _parse_week_code(self, week_code: str) -> tuple[int | None, int] | None:
+        raw = str(week_code or "").strip()
+        if not raw:
+            return None
+
+        match = re.search(r"(?:(\d{2,4})\s*[-/]?\s*)?W?(\d{1,2})$", raw, flags=re.IGNORECASE)
+        if not match:
+            return None
+
+        year_text = match.group(1)
+        week_text = match.group(2)
+        year: int | None = None
+        if year_text:
+            year = int(year_text)
+            if year < 100:
+                year += 2000
+        return year, int(week_text)
+
+    def _canonical_week_code(self, week_code: str, *, fallback: str | None = None) -> str | None:
+        parsed = self._parse_week_code(week_code)
+        if parsed is None:
+            return str(week_code or "").strip() or None
+
+        year, week = parsed
+        if year is None and fallback:
+            fallback_parsed = self._parse_week_code(fallback)
+            if fallback_parsed is not None:
+                year = fallback_parsed[0]
+
+        if year is None:
+            return f"W{week:02d}"
+        return f"{year % 100:02d}-W{week:02d}"
+
+    def _week_matches(self, left: str, right: str) -> bool:
+        left_parsed = self._parse_week_code(left)
+        right_parsed = self._parse_week_code(right)
+        if left_parsed and right_parsed:
+            left_year, left_week = left_parsed
+            right_year, right_week = right_parsed
+            if left_week != right_week:
+                return False
+            if left_year is None or right_year is None:
+                return True
+            return left_year == right_year
+        return str(left or "").strip() == str(right or "").strip()
+
+    def _task_matches_week(self, task: dict[str, Any], week_code: str) -> bool:
+        return self._week_matches(self._task_week_value(task), week_code)
+
+    def _founder_matches_row(self, row: dict[str, Any], founder_name: str) -> bool:
+        value = self._property_text(row, "Founder")
+        if not value:
+            return False
+        tokens = {
+            token.strip().lower()
+            for token in re.split(r"[,/]", value)
+            if token.strip()
+        }
+        if value.strip().lower() == founder_name.strip().lower():
+            return True
+        return founder_name.strip().lower() in tokens
+
+    def _daily_log_founder_value(self, row: dict[str, Any]) -> str:
+        explicit = self._property_text(row, "Founder")
+        if explicit:
+            return explicit
+
+        title = self._page_title(row)
+        if not title:
+            return ""
+        return title.split("·", 1)[0].strip()
+
+    def get_current_week_from_settings(self) -> str:
+        if not self.settings_db_id:
+            return self._infer_current_week_from_tasks()
+        rows = self._query_all(self.settings_db_id)
+        if not rows:
+            raise RuntimeError("Settings database is empty.")
+        row = rows[0]
+        week_code = self._property_text(row, "Current Week")
+        if not re.match(r"^\d{2}-W\d{1,2}$", week_code):
+            raise RuntimeError(f"Invalid week code in settings: {week_code}")
+        return week_code
+
+    def set_current_week_in_settings(self, week_code: str, status: str, count: int) -> None:
+        if not self.settings_db_id:
+            LOGGER.info("Settings database ID not configured; skipping current week settings update.")
+            return
+        rows = self._query_all(self.settings_db_id)
+        if not rows:
+            raise RuntimeError("Settings database is empty.")
+        row = rows[0]
+        now_iso = datetime.now().isoformat()
+        schema = self._retrieve_schema(self.settings_db_id)
+        properties: dict[str, Any] = {}
+        current_week_prop = self._existing_property_name(schema, "Current Week") or "Current Week"
+        properties[current_week_prop] = self._build_scalar_property_value(schema.get(current_week_prop, {"type": "rich_text"}), week_code)
+
+        rollover_run_prop = self._existing_property_name(schema, "Last Rollover Run") or "Last Rollover Run"
+        properties[rollover_run_prop] = {"date": {"start": now_iso}}
+
+        rollover_status_prop = self._existing_property_name(schema, "Last Rollover Status") or "Last Rollover Status"
+        if schema.get(rollover_status_prop, {}).get("type") in {"select", "status"}:
+            properties[rollover_status_prop] = self._build_named_option_value(schema[rollover_status_prop], status)
+        else:
+            properties[rollover_status_prop] = {"rich_text": self._rich_text(status)}
+
+        moved_count_prop = self._existing_property_name(schema, "Last Rollover Moved Count") or "Last Rollover Moved Count"
+        properties[moved_count_prop] = {"number": count}
+        self.client.pages.update(page_id=row["id"], properties=properties)
+
+    def get_next_week_code(self, current_week: str) -> str:
+        year_part, week_part = current_week.split("-W")
+        year = 2000 + int(year_part)
+        week = int(week_part)
+        # Use a safe date within the current week to calculate the next week.
+        # ISO week 1 is the week with the first Thursday of the year.
+        # We can find a date in the current week and add 7 days.
+        current_date = datetime.strptime(f"{year}-W{week}-4", "%G-W%V-%u")
+        next_date = current_date + timedelta(days=7)
+        iso_year, iso_week, _ = next_date.isocalendar()
+        return f"{iso_year % 100:02d}-W{iso_week:02d}"
+
+    def find_incomplete_tasks_for_week(self, week_code: str) -> list[dict[str, Any]]:
+        tasks = self._query_all(self.tasks_db_id)
+        return [
+            task
+            for task in tasks
+            if self._task_matches_week(task, week_code)
+            and not self._is_task_done(task)
+            and not self._is_task_archived(task)
+        ]
+
+    def rollover_task(self, task: dict[str, Any], to_week: str) -> None:
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        properties: dict[str, Any] = {}
+
+        # Update Week
+        if prop := self._get_schema_property(db_schema, "Week"):
+            prop_name = self._property_name(prop, "Week")
+            properties[prop_name] = self._build_scalar_property_value(prop, to_week)
+
+        # Update Description prefix
+        desc_prop_name = "Description"
+        if prop := self._get_schema_property(db_schema, "Description"):
+            desc_prop_name = self._property_name(prop, "Description")
+
+        current_desc_objs = task.get("properties", {}).get(desc_prop_name, {}).get("rich_text", [])
+        current_desc_text = "".join(obj.get("plain_text", "") for obj in current_desc_objs)
+
+        carryover_prefix = "↩ carryover | "
+        stale_prefix = "⚠ stale | "
+
+        if current_desc_text.startswith(carryover_prefix):
+            new_desc_text = stale_prefix + current_desc_text[len(carryover_prefix) :]
+        elif not current_desc_text.startswith(stale_prefix):
+            new_desc_text = carryover_prefix + current_desc_text
+        else:
+            new_desc_text = current_desc_text  # Already stale, keep as is
+
+        properties[desc_prop_name] = {"rich_text": self._rich_text(new_desc_text)}
+
+        self.client.pages.update(page_id=task["id"], properties=properties)
+
+    def set_is_current_week_flags(self, from_week: str, to_week: str) -> None:
+        tasks = self._query_all(self.tasks_db_id)
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        current_week_prop_name = self._existing_property_name(db_schema, "Is Current Week")
+        if not current_week_prop_name:
+            LOGGER.info("Tasks database has no Is Current Week property; skipping flag sync.")
+            return
+        for task in tasks:
+            is_currently_flagged = bool(self._property(task, "Is Current Week").get("checkbox", False))
+            task_week = self._task_week_value(task)
+
+            should_be_flagged = self._week_matches(task_week, to_week)
+            # If from_week == to_week (unlikely but possible), it stays true.
+
+            if is_currently_flagged != should_be_flagged:
+                self.client.pages.update(
+                    page_id=task["id"],
+                    properties={current_week_prop_name: {"checkbox": should_be_flagged}},
+                )
+
+    def _infer_current_week_from_tasks(self) -> str:
+        tasks = self._query_all(self.tasks_db_id)
+        week_codes = [
+            self._task_week_value(task)
+            for task in tasks
+            if self._task_week_value(task) and not self._is_task_archived(task)
+        ]
+        if not week_codes:
+            raise RuntimeError("Unable to infer current week because no task rows expose a Week value.")
+        latest = max(week_codes, key=self._week_sort_key)
+        canonical = self._canonical_week_code(latest)
+        if not canonical:
+            raise RuntimeError(f"Unable to infer current week from task Week value: {latest}")
+        return canonical

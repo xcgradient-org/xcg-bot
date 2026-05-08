@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from typing import Any
 
 import discord
@@ -13,6 +14,7 @@ from log_command import MADRID_TZ, current_context, founder_mapping
 
 
 LOGGER = logging.getLogger("xcg_bot.task_command")
+TASK_WEEK_ROLLOVER_TIME = time(17, 0)
 MONTH_NAMES = [
     "Jan",
     "Feb",
@@ -60,9 +62,7 @@ class _TaskAddState:
         match = next((project for project in self.projects if project["id"] == project_id), None)
         if match is None:
             raise RuntimeError(f"Unknown project selected: {project_id}")
-        self.selected_project_id = match["id"]
-        self.selected_project_name = match["name"]
-        self.preview_ids = self.notion.preview_task_ids(
+        preview_ids = self.notion.preview_task_ids(
             project_id=match["id"],
             project_name=match["name"],
             role=self.founder["role"],
@@ -70,12 +70,80 @@ class _TaskAddState:
             quarter_name=self.quarter_name,
             count=len(self.descriptions),
         )
+        self.selected_project_id = match["id"]
+        self.selected_project_name = match["name"]
+        self.preview_ids = preview_ids
 
 
 def _clean_description(text: str) -> str:
     cleaned = " ".join(str(text or "").strip().split())
     cleaned = cleaned.strip(" \t\r\n-•,;")
     return cleaned
+
+
+def _restore_source_casing(raw_text: str, description: str) -> str:
+    casing_map: dict[str, str] = {}
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9()'-]*", raw_text):
+        lowered = token.lower()
+        casing_map.setdefault(lowered, token)
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        source_token = casing_map.get(token.lower())
+        if not source_token or source_token == source_token.lower():
+            return token
+        return source_token
+
+    return re.sub(r"[A-Za-z][A-Za-z0-9()'-]*", replace, description)
+
+
+def _extract_task_object(description: str) -> str:
+    match = re.match(
+        r"^(?:set up|setup|create|open|configure|prepare|draft|plan|propose)\s+(.+)$",
+        description,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def _contextualize_followup_descriptions(descriptions: list[str]) -> list[str]:
+    contextualized: list[str] = []
+    previous_object = ""
+    for description in descriptions:
+        rewritten = description
+        if previous_object:
+            match = re.match(
+                r"^(add|invite|include)\s+([A-Za-z][A-Za-z0-9' -]*)$",
+                description,
+                flags=re.IGNORECASE,
+            )
+            if match and len(description.split()) <= 3:
+                action = match.group(1).lower().capitalize()
+                subject = match.group(2).strip()
+                rewritten = f"{action} {subject} to {previous_object}"
+
+        contextualized.append(rewritten)
+        task_object = _extract_task_object(rewritten)
+        if task_object:
+            previous_object = task_object
+    return contextualized
+
+
+def _finalize_task_descriptions(raw_text: str, descriptions: list[str]) -> list[str]:
+    finalized: list[str] = []
+    contextualized = _contextualize_followup_descriptions(descriptions)
+    for description in contextualized:
+        cleaned = _clean_description(description)
+        if not cleaned:
+            continue
+        cleaned = _restore_source_casing(raw_text, cleaned)
+        cleaned = cleaned[0].upper() + cleaned[1:] if cleaned else cleaned
+        if cleaned[-1] not in ".!?":
+            cleaned = f"{cleaned}."
+        finalized.append(cleaned)
+    return finalized
 
 
 def _normalize_task_descriptions(payload: dict[str, Any] | None) -> list[str]:
@@ -164,25 +232,26 @@ def _parse_task_descriptions(reflection, raw_text: str) -> list[str]:
                 len(coarse_descriptions),
                 raw_text,
             )
-            return coarse_descriptions
+            return _finalize_task_descriptions(raw_text, coarse_descriptions)
         LOGGER.warning(
             "Task parsing returned %s tasks without an explicit multi-task request; limiting to the first 4 tasks for text: %s",
             len(descriptions),
             raw_text,
         )
-        return descriptions[:4]
+        return _finalize_task_descriptions(raw_text, descriptions[:4])
     if descriptions:
-        return descriptions
-    return _fallback_task_descriptions(raw_text)
+        return _finalize_task_descriptions(raw_text, descriptions)
+    return _finalize_task_descriptions(raw_text, _fallback_task_descriptions(raw_text))
 
 
-def _build_state(raw_text: str, descriptions: list[str], projects: list[dict[str, str]], founder: dict[str, str]) -> _TaskAddState:
+def _build_state(notion, raw_text: str, descriptions: list[str], projects: list[dict[str, str]], founder: dict[str, str]) -> _TaskAddState:
     now = datetime.now(MADRID_TZ)
     ctx = current_context(now)
+    ctx.week_code = _task_creation_week_code(now)
     quarter_name = f"Q{((now.month - 1) // 3) + 1} {now.year}"
     month_name = MONTH_NAMES[now.month - 1]
     return _TaskAddState(
-        notion=None,  # caller fills this in immediately after creation
+        notion=notion,
         founder=founder,
         raw_text=raw_text,
         descriptions=descriptions,
@@ -207,6 +276,7 @@ def _build_message(state: _TaskAddState) -> str:
                 f"Project: **{state.selected_project_name}**",
                 f"Role: **{state.founder['role']}**",
                 f"Quarter: **{state.quarter_name}**",
+                f"Week: **{state.week_code}**",
                 "Will create:",
                 *(f"• {display_id} — {description}" for display_id, description in zip(state.preview_ids, state.descriptions, strict=False)),
                 "",
@@ -216,6 +286,22 @@ def _build_message(state: _TaskAddState) -> str:
     else:
         lines.append("Choose the project to preview IDs before writing to Notion.")
     return "\n".join(lines)
+
+
+def _task_creation_week_code(now: datetime | None = None) -> str:
+    local_now = now or datetime.now(MADRID_TZ)
+    if local_now.tzinfo is None:
+        local_now = MADRID_TZ.localize(local_now)
+    else:
+        local_now = local_now.astimezone(MADRID_TZ)
+
+    weekday = local_now.weekday()
+    after_rollover = weekday > 4 or (weekday == 4 and local_now.time() >= TASK_WEEK_ROLLOVER_TIME)
+    if after_rollover:
+        local_now = local_now + timedelta(days=3)
+
+    iso_year, iso_week, _ = local_now.isocalendar()
+    return f"{iso_year % 100:02d}-W{iso_week:02d}"
 
 
 class _ProjectSelect(discord.ui.Select):
@@ -238,8 +324,18 @@ class _ProjectSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
-        self.state.choose_project(self.values[0])
-        await interaction.response.edit_message(
+        await interaction.response.defer()
+        try:
+            await asyncio.to_thread(self.state.choose_project, self.values[0])
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Task project preview failed: %s", exc)
+            await interaction.edit_original_response(
+                content=f"I couldn't preview task IDs for that project: {exc}",
+                view=_TaskProjectPickerView(self.state),
+            )
+            return
+
+        await interaction.edit_original_response(
             content=_build_message(self.state),
             view=_TaskProjectPickerView(self.state),
         )
@@ -262,10 +358,12 @@ class _ConfirmCreateButton(discord.ui.Button):
 
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            self.state.notion.create_tasks_batch(
+            await asyncio.to_thread(
+                self.state.notion.create_tasks_batch,
                 project_id=self.state.selected_project_id,
                 project_name=self.state.selected_project_name,
                 role=self.state.founder["role"],
+                founder_name=self.state.founder["name"],
                 descriptions=self.state.descriptions,
                 year=self.state.year,
                 quarter_name=self.state.quarter_name,
@@ -322,7 +420,7 @@ def register_task_command(bot, tree: app_commands.CommandTree, notion, reflectio
 
         await interaction.response.defer(ephemeral=True)
 
-        descriptions = _parse_task_descriptions(reflection, text)
+        descriptions = await asyncio.to_thread(_parse_task_descriptions, reflection, text)
         if not descriptions:
             await interaction.followup.send(
                 "I couldn't extract any task descriptions from that text.",
@@ -331,7 +429,7 @@ def register_task_command(bot, tree: app_commands.CommandTree, notion, reflectio
             return
 
         try:
-            projects = notion.list_projects()
+            projects = await asyncio.to_thread(notion.list_projects)
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Project lookup failed: %s", exc)
             await interaction.followup.send(
@@ -344,8 +442,7 @@ def register_task_command(bot, tree: app_commands.CommandTree, notion, reflectio
             await interaction.followup.send("No projects were found in Notion.", ephemeral=True)
             return
 
-        state = _build_state(text, descriptions, projects, founder)
-        state.notion = notion
+        state = _build_state(notion, text, descriptions, projects, founder)
         await interaction.followup.send(
             _build_message(state),
             view=_TaskProjectPickerView(state),

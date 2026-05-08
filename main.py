@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,8 +25,6 @@ ENV_PATHS = (
     Path(__file__).resolve().parent / ".env",
     Path(__file__).resolve().parents[1] / ".env",
 )
-LOCAI_CONFIG_PATH = Path.home() / ".config/locai/config.json"
-
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -40,11 +37,13 @@ class Settings:
     notion_daily_logs_db_id: str
     notion_streaks_db_id: str
     notion_meetings_db_id: str
+    notion_settings_db_id: str | None
     discord_blockers_channel_id: int
     discord_announcements_channel_id: int
     llm_base_url: str
     llm_model: str
     llm_api_key: str
+    llm_api_keys: tuple[str, ...]
     llm_api_style: str
 
 
@@ -54,6 +53,8 @@ def configure_logging() -> None:
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
         stream=sys.stdout,
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def load_environment() -> Path | None:
@@ -64,42 +65,60 @@ def load_environment() -> Path | None:
     return None
 
 
-def default_llm_settings() -> tuple[str, str, str, str]:
+def _split_api_keys(value: str) -> list[str]:
+    keys: list[str] = []
+    for chunk in value.replace("\n", ",").split(","):
+        key = chunk.strip()
+        if key:
+            keys.append(key)
+    return keys
+
+
+def _llm_api_keys_from_env() -> tuple[str, ...]:
+    keys: list[str] = []
+    for env_name in (
+        "LLM_API_KEY",
+        "LLM_API_KEY_1",
+        "LLM_API_KEY_2",
+        "LLM_API_KEY_3",
+        "GROQ_API_KEY",
+        "GROQ_API_KEY_1",
+        "GROQ_API_KEY_2",
+        "GROQ_API_KEY_3",
+    ):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            keys.append(value)
+
+    keys.extend(_split_api_keys(os.getenv("LLM_API_KEYS", "")))
+    keys.extend(_split_api_keys(os.getenv("GROQ_API_KEYS", "")))
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return tuple(deduped)
+
+
+def default_llm_settings() -> tuple[str, str, tuple[str, ...], str]:
     explicit_base_url = os.getenv("LLM_BASE_URL", "").strip()
     explicit_model = os.getenv("LLM_MODEL", "").strip()
-    explicit_api_key = os.getenv("LLM_API_KEY", "").strip()
     explicit_api_style = os.getenv("LLM_API_STYLE", "").strip().lower()
 
-    legacy_base_url = os.getenv("OLLAMA_BASE_URL", "").strip()
-    legacy_model = os.getenv("OLLAMA_MODEL", "").strip()
-    locai_api_key = os.getenv("LOCAI_API_KEY", "").strip()
+    base_url = explicit_base_url or "https://api.groq.com/openai/v1"
+    model = explicit_model or "openai/gpt-oss-20b"
+    api_keys = _llm_api_keys_from_env()
 
-    locai_base_url = ""
-    if LOCAI_CONFIG_PATH.exists():
-        try:
-            payload = json.loads(LOCAI_CONFIG_PATH.read_text(encoding="utf-8"))
-            settings = payload.get("settings", {})
-            public_host = str(settings.get("public_host") or "").strip()
-            public_port = settings.get("public_port")
-            if public_host and public_port:
-                locai_base_url = f"http://{public_host}:{public_port}/v1"
-        except Exception:  # noqa: BLE001
-            LOGGER.warning("Unable to parse locai config at %s", LOCAI_CONFIG_PATH)
-
-    base_url = explicit_base_url or legacy_base_url or locai_base_url or "http://127.0.0.1:11434"
-    model = explicit_model or legacy_model or ("qwen-32B" if locai_base_url else "qwen2.5:32b")
-    api_key = explicit_api_key or locai_api_key
-
-    if explicit_api_style in {"openai", "ollama"}:
+    if explicit_api_style in {"", "openai"}:
         api_style = explicit_api_style
-    elif explicit_base_url or locai_base_url:
-        api_style = "openai" if "/v1" in base_url or ":18080" in base_url else "ollama"
-    elif legacy_base_url or legacy_model:
-        api_style = "ollama"
     else:
-        api_style = "openai" if locai_base_url else "ollama"
+        raise RuntimeError("Only LLM_API_STYLE=openai is supported. Local LLM and Gemini fallbacks are disabled.")
+    api_style = api_style or "openai"
 
-    return base_url, model, api_key, api_style
+    return base_url, model, api_keys, api_style
 
 
 def load_settings() -> Settings:
@@ -131,7 +150,8 @@ def load_settings() -> Settings:
 
     LOGGER.info("Loaded environment from %s", env_path)
     LOGGER.info("All required environment variables are present.")
-    llm_base_url, llm_model, llm_api_key, llm_api_style = default_llm_settings()
+    llm_base_url, llm_model, llm_api_keys, llm_api_style = default_llm_settings()
+    notion_settings_db_id = os.getenv("NOTION_SETTINGS_DB_ID", "").strip() or None
 
     return Settings(
         discord_token=required["DISCORD_TOKEN"],
@@ -143,11 +163,13 @@ def load_settings() -> Settings:
         notion_daily_logs_db_id=required["NOTION_DAILY_LOGS_DB_ID"],
         notion_streaks_db_id=required["NOTION_STREAKS_DB_ID"],
         notion_meetings_db_id=required["NOTION_MEETINGS_DB_ID"],
+        notion_settings_db_id=notion_settings_db_id,
         discord_blockers_channel_id=int(required["DISCORD_BLOCKERS_CHANNEL_ID"]),
         discord_announcements_channel_id=int(required["DISCORD_ANNOUNCEMENTS_CHANNEL_ID"]),
         llm_base_url=llm_base_url,
         llm_model=llm_model,
-        llm_api_key=llm_api_key,
+        llm_api_key=llm_api_keys[0] if llm_api_keys else "",
+        llm_api_keys=llm_api_keys,
         llm_api_style=llm_api_style,
     )
 
@@ -186,8 +208,10 @@ class XCGradientOSBot(commands.Bot):
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("Unable to verify announcements channel %s: %s", self.settings.discord_announcements_channel_id, exc)
 
-            if self.reset_task is None or self.reset_task.done():
+            if self.notion.streaks_available() and (self.reset_task is None or self.reset_task.done()):
                 self.reset_task = start_daily_reset_task(self, self.notion)
+            elif not self.notion.streaks_available():
+                LOGGER.info("Streak maintenance is disabled because the configured Streaks database is unavailable.")
             if self.new_meeting_task is None or self.new_meeting_task.done():
                 self.new_meeting_task = start_new_meeting_poller(
                     self,
@@ -222,6 +246,7 @@ def main() -> None:
         tasks_db_id=settings.notion_tasks_db_id,
         daily_logs_db_id=settings.notion_daily_logs_db_id,
         streaks_db_id=settings.notion_streaks_db_id,
+        settings_db_id=settings.notion_settings_db_id,
     )
     notion.verify_startup()
     notion.client.databases.retrieve(database_id=settings.notion_meetings_db_id)
@@ -230,7 +255,7 @@ def main() -> None:
     reflection = ReflectionService(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
+        api_keys=settings.llm_api_keys,
         api_style=settings.llm_api_style,
     )
     try:
