@@ -16,6 +16,7 @@ from meeting_command import register_meeting_command
 from meetings import start_meeting_reminder_poller, start_new_meeting_poller
 from notion import NotionService
 from reflection import ReflectionService
+from rollover_command import register_rollover_command
 from streaks import start_daily_reset_task
 from task_command import register_task_command
 
@@ -35,7 +36,7 @@ class Settings:
     discord_user_id_adam: int
     notion_tasks_db_id: str
     notion_daily_logs_db_id: str
-    notion_streaks_db_id: str
+    notion_team_db_id: str
     notion_meetings_db_id: str
     notion_settings_db_id: str | None
     discord_blockers_channel_id: int
@@ -109,7 +110,7 @@ def default_llm_settings() -> tuple[str, str, tuple[str, ...], str]:
     explicit_api_style = os.getenv("LLM_API_STYLE", "").strip().lower()
 
     base_url = explicit_base_url or "https://api.groq.com/openai/v1"
-    model = explicit_model or "openai/gpt-oss-20b"
+    model = explicit_model or "llama-3.3-70b-versatile"
     api_keys = _llm_api_keys_from_env()
 
     if explicit_api_style in {"", "openai"}:
@@ -129,7 +130,8 @@ def load_settings() -> Settings:
 
     notion_tasks_db_id = os.getenv("NOTION_TASKS_DB_ID", "").strip() or os.getenv("NOTION_TASKS_DB", "").strip()
     notion_daily_logs_db_id = os.getenv("NOTION_DAILY_LOGS_DB_ID", "").strip() or os.getenv("NOTION_DAILY_LOGS_DB", "").strip()
-    notion_streaks_db_id = os.getenv("NOTION_STREAKS_DB_ID", "").strip() or os.getenv("NOTION_STREAKS_DB", "").strip()
+    notion_team_db_id = os.getenv("NOTION_TEAM_DB_ID", "").strip() or os.getenv("NOTION_TEAM_DB", "").strip()
+    notion_meetings_db_id = os.getenv("NOTION_MEETINGS_DB_ID", "").strip() or os.getenv("NOTION_MEETINGS_DB", "").strip()
 
     required = {
         "DISCORD_TOKEN": os.getenv("DISCORD_TOKEN", "").strip(),
@@ -139,8 +141,8 @@ def load_settings() -> Settings:
         "DISCORD_USER_ID_ADAM": os.getenv("DISCORD_USER_ID_ADAM", "").strip(),
         "NOTION_TASKS_DB_ID": notion_tasks_db_id,
         "NOTION_DAILY_LOGS_DB_ID": notion_daily_logs_db_id,
-        "NOTION_STREAKS_DB_ID": notion_streaks_db_id,
-        "NOTION_MEETINGS_DB_ID": os.getenv("NOTION_MEETINGS_DB_ID", "").strip(),
+        "NOTION_TEAM_DB_ID": notion_team_db_id,
+        "NOTION_MEETINGS_DB_ID": notion_meetings_db_id,
         "DISCORD_BLOCKERS_CHANNEL_ID": os.getenv("DISCORD_BLOCKERS_CHANNEL_ID", "").strip(),
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": os.getenv("DISCORD_ANNOUNCEMENTS_CHANNEL_ID", "").strip(),
     }
@@ -161,7 +163,7 @@ def load_settings() -> Settings:
         discord_user_id_adam=int(required["DISCORD_USER_ID_ADAM"]),
         notion_tasks_db_id=required["NOTION_TASKS_DB_ID"],
         notion_daily_logs_db_id=required["NOTION_DAILY_LOGS_DB_ID"],
-        notion_streaks_db_id=required["NOTION_STREAKS_DB_ID"],
+        notion_team_db_id=required["NOTION_TEAM_DB_ID"],
         notion_meetings_db_id=required["NOTION_MEETINGS_DB_ID"],
         notion_settings_db_id=notion_settings_db_id,
         discord_blockers_channel_id=int(required["DISCORD_BLOCKERS_CHANNEL_ID"]),
@@ -190,7 +192,8 @@ class XCGradientOSBot(commands.Bot):
         register_blocker_command(self, self.tree, self.reflection, self.settings)
         register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
         register_task_command(self, self.tree, self.notion, self.reflection, self.settings)
-        LOGGER.info("✅ /meeting, /log, /blocker, and /tasks commands registered")
+        register_rollover_command(self.tree, self.notion, self.settings)
+        LOGGER.info("✅ /meeting, /log, /blocker, /tasks, and /rollover commands registered")
         synced = await self.tree.sync()
         LOGGER.info("Slash commands synced: %s", len(synced))
 
@@ -245,7 +248,7 @@ def main() -> None:
         token=settings.notion_token,
         tasks_db_id=settings.notion_tasks_db_id,
         daily_logs_db_id=settings.notion_daily_logs_db_id,
-        streaks_db_id=settings.notion_streaks_db_id,
+        team_db_id=settings.notion_team_db_id,
         settings_db_id=settings.notion_settings_db_id,
     )
     notion.verify_startup()

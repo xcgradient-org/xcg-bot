@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 import datetime as dt
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 
 BOT_DIR = Path(__file__).resolve().parents[1]
@@ -61,8 +61,8 @@ class LoadSettingsTests(unittest.TestCase):
             "DISCORD_USER_ID_ADAM": "333",
             "NOTION_TASKS_DB": "tasks-db",
             "NOTION_DAILY_LOGS_DB": "daily-db",
-            "NOTION_STREAKS_DB": "streaks-db",
-            "NOTION_MEETINGS_DB_ID": "meetings-db",
+            "NOTION_TEAM_DB": "team-db",
+            "NOTION_MEETINGS_DB": "meetings-db",
             "NOTION_SETTINGS_DB_ID": "settings-db",
             "DISCORD_BLOCKERS_CHANNEL_ID": "123",
             "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
@@ -73,7 +73,7 @@ class LoadSettingsTests(unittest.TestCase):
 
         self.assertEqual(settings.notion_tasks_db_id, "tasks-db")
         self.assertEqual(settings.notion_daily_logs_db_id, "daily-db")
-        self.assertEqual(settings.notion_streaks_db_id, "streaks-db")
+        self.assertEqual(settings.notion_team_db_id, "team-db")
         self.assertEqual(settings.notion_meetings_db_id, "meetings-db")
         self.assertEqual(settings.notion_settings_db_id, "settings-db")
         self.assertEqual(settings.discord_user_id_oriol, 111)
@@ -98,8 +98,8 @@ class LoadSettingsTests(unittest.TestCase):
             "DISCORD_USER_ID_ADAM": "333",
             "NOTION_TASKS_DB": "tasks-db",
             "NOTION_DAILY_LOGS_DB": "daily-db",
-            "NOTION_STREAKS_DB": "streaks-db",
-            "NOTION_MEETINGS_DB_ID": "meetings-db",
+            "NOTION_TEAM_DB": "team-db",
+            "NOTION_MEETINGS_DB": "meetings-db",
             "DISCORD_BLOCKERS_CHANNEL_ID": "123",
             "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
         }
@@ -114,7 +114,7 @@ class LoadSettingsTests(unittest.TestCase):
             base_url, model, api_keys, api_style = main.default_llm_settings()
 
         self.assertEqual(base_url, "https://api.groq.com/openai/v1")
-        self.assertEqual(model, "openai/gpt-oss-20b")
+        self.assertEqual(model, "llama-3.3-70b-versatile")
         self.assertEqual(api_keys, ())
         self.assertEqual(api_style, "openai")
 
@@ -123,7 +123,7 @@ class LoadSettingsTests(unittest.TestCase):
             "os.environ",
             {
                 "LLM_BASE_URL": "https://api.groq.com/openai/v1",
-                "LLM_MODEL": "openai/gpt-oss-20b",
+                "LLM_MODEL": "llama-3.3-70b-versatile",
                 "LLM_API_KEY": "key-1",
                 "LLM_API_KEY_2": "key-2",
                 "LLM_API_KEYS": "key-2,key-3",
@@ -135,7 +135,7 @@ class LoadSettingsTests(unittest.TestCase):
             base_url, model, api_keys, api_style = main.default_llm_settings()
 
         self.assertEqual(base_url, "https://api.groq.com/openai/v1")
-        self.assertEqual(model, "openai/gpt-oss-20b")
+        self.assertEqual(model, "llama-3.3-70b-versatile")
         self.assertEqual(api_keys, ("key-1", "key-2", "key-4", "key-3"))
         self.assertEqual(api_style, "openai")
 
@@ -160,14 +160,15 @@ class ReflectionServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Local LLM and Gemini fallbacks are disabled"):
             reflection.ReflectionService(model="openai/gpt-oss-20b", api_style="ollama")
 
-    def test_verify_startup_raises_if_model_missing(self) -> None:
-        service = reflection.ReflectionService(model="missing-model")
-        with patch.object(service, "_get_json", return_value={"data": [{"id": "openai/gpt-oss-20b"}]}):
-            with self.assertRaisesRegex(RuntimeError, "not available"):
+    def test_verify_startup_raises_if_no_preferred_models_available(self) -> None:
+        service = reflection.ReflectionService(model="some-model")
+        with patch.object(service, "_get_json", return_value={"data": [{"id": "unrelated-model"}]}):
+            with self.assertRaisesRegex(RuntimeError, "None of the preferred models"):
                 service.verify_startup()
 
-    def test_verify_startup_accepts_openai_compatible_model(self) -> None:
+    def test_verify_startup_accepts_partial_preferred_model_set(self) -> None:
         service = reflection.ReflectionService(model="openai/gpt-oss-20b")
+        # Only one of the preferred models is available — should not raise
         with patch.object(service, "_get_json", return_value={"data": [{"id": "openai/gpt-oss-20b"}]}) as get_json:
             service.verify_startup()
         get_json.assert_called_once_with("/models")
@@ -577,13 +578,13 @@ class TaskCommandTests(unittest.TestCase):
         before_cutoff = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 1, 16, 55))
         self.assertEqual(task_command._task_creation_week_code(before_cutoff), "26-W18")
 
-    def test_task_creation_week_code_uses_next_week_at_friday_cutoff(self) -> None:
+    def test_task_creation_week_code_uses_current_week_at_friday_cutoff(self) -> None:
         at_cutoff = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 1, 17, 0))
-        self.assertEqual(task_command._task_creation_week_code(at_cutoff), "26-W19")
+        self.assertEqual(task_command._task_creation_week_code(at_cutoff), "26-W18")
 
-    def test_task_creation_week_code_uses_next_week_on_sunday(self) -> None:
+    def test_task_creation_week_code_uses_current_week_on_sunday(self) -> None:
         sunday = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 3, 12, 0))
-        self.assertEqual(task_command._task_creation_week_code(sunday), "26-W19")
+        self.assertEqual(task_command._task_creation_week_code(sunday), "26-W18")
 
     def test_choose_project_only_updates_state_after_preview_succeeds(self) -> None:
         notion_service = MagicMock()
@@ -645,7 +646,7 @@ class TaskCommandTests(unittest.TestCase):
 
 class NotionTaskCreationTests(unittest.TestCase):
     def test_list_projects_uses_related_database(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", team_db_id="team")
         with patch.object(service, "_retrieve_schema", return_value={"Project": {"type": "relation", "relation": {"database_id": "projects-db"}}}):
             with patch.object(
                 service,
@@ -660,7 +661,7 @@ class NotionTaskCreationTests(unittest.TestCase):
         self.assertEqual(projects, [{"id": "proj-1", "name": "ALPHA"}, {"id": "proj-2", "name": "NEON"}])
 
     def test_preview_task_ids_counts_matching_project_role_quarter_year(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {
                 "id": "task-1",
@@ -707,11 +708,12 @@ class NotionTaskCreationTests(unittest.TestCase):
         self.assertEqual(preview_ids, ["ALPHA-CEO-3", "ALPHA-CEO-4"])
 
     def test_create_tasks_batch_builds_expected_properties(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks-db", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         service.client.data_sources = None
         schema = {
             "Display ID": {"type": "title"},
+            "Owner": {"type": "relation"},
             "Role": {"type": "select", "select": {"options": [{"name": "CEO"}]}},
             "Project": {"type": "relation"},
             "Description": {"type": "rich_text"},
@@ -725,26 +727,35 @@ class NotionTaskCreationTests(unittest.TestCase):
         }
         with patch.object(service, "_retrieve_schema", return_value=schema):
             with patch.object(service, "preview_task_ids", return_value=["ALPHA-CEO-1", "ALPHA-CEO-2"]):
-                service.create_tasks_batch(
-                    project_id="proj-1",
-                    project_name="ALPHA",
-                    role="CEO",
-                    descriptions=["Draft investor update", "Prepare demo script"],
-                    year=2026,
-                    quarter_name="Q2 2026",
-                    month_name="Apr",
-                    week_code="26-W16",
-                    today_iso="2026-04-16",
-                )
+                with patch.object(service, "lookup_team_member_id", return_value="team-member-1"):
+                    service.client.pages.create.side_effect = [
+                        {"id": "task-1"},
+                        {"id": "task-2"},
+                    ]
+                    service.create_tasks_batch(
+                        project_id="proj-1",
+                        project_name="ALPHA",
+                        role="CEO",
+                        founder_name="Oriol",
+                        descriptions=["Draft investor update", "Prepare demo script"],
+                        year=2026,
+                        quarter_name="Q2 2026",
+                        month_name="Apr",
+                        week_code="26-W16",
+                        today_iso="2026-04-16",
+                    )
 
         create_calls = service.client.pages.create.call_args_list
         self.assertEqual(len(create_calls), 2)
+        # Owner is set inline during create; no separate pages.update calls expected
+        service.client.pages.update.assert_not_called()
         first_kwargs = create_calls[0].kwargs
         self.assertEqual(first_kwargs["parent"], {"database_id": "tasks-db"})
         self.assertEqual(
             first_kwargs["properties"]["Display ID"]["title"][0]["text"]["content"],
             "ALPHA-CEO-1",
         )
+        self.assertEqual(first_kwargs["properties"]["Owner"]["relation"], [{"id": "team-member-1"}])
         self.assertEqual(first_kwargs["properties"]["Role"]["select"]["name"], "CEO")
         self.assertEqual(first_kwargs["properties"]["Project"]["relation"], [{"id": "proj-1"}])
         self.assertEqual(
@@ -758,6 +769,18 @@ class NotionTaskCreationTests(unittest.TestCase):
         self.assertFalse(first_kwargs["properties"]["Status"]["checkbox"])
         self.assertFalse(first_kwargs["properties"]["Done"]["checkbox"])
         self.assertIsNone(first_kwargs["properties"]["Done date"]["date"])
+
+    def test_task_matches_founder_ignores_owner_relation_and_falls_back_to_display_id(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
+        task = {
+            "properties": {
+                "Owner": {"type": "relation", "relation": [{"id": "daily-log-page"}]},
+                "Display ID": {"type": "title", "title": [{"plain_text": "ALPHA-CEO-72"}]},
+            }
+        }
+
+        self.assertTrue(service._task_matches_founder(task, role="CEO", founder_name="Oriol"))
+        self.assertFalse(service._task_matches_founder(task, role="COO", founder_name="Adam"))
 
 
 class MeetingsFormattingTests(unittest.TestCase):
@@ -821,7 +844,7 @@ class MeetingsPollerTests(unittest.IsolatedAsyncioTestCase):
 
 class NotionServiceTests(unittest.TestCase):
     def test_is_task_done_supports_checkbox_and_status(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         checkbox_page = {"properties": {"Status": {"type": "checkbox", "checkbox": True}}}
         status_page = {"properties": {"Status": {"type": "status", "status": {"name": "Done"}}}}
         select_page = {"properties": {"Status": {"type": "select", "select": {"name": "Completed"}}}}
@@ -837,7 +860,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertTrue(service._is_task_done(paired_page))
 
     def test_task_matches_founder_from_display_id_when_owner_fields_are_absent(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         task = {
             "properties": {
                 "Display ID": {"type": "title", "title": [{"plain_text": "ALPHA-CEO-45"}]},
@@ -848,7 +871,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertFalse(service._task_matches_founder(task, role="CTO", founder_name="Arnau"))
 
     def test_query_all_uses_data_source_query_when_database_query_missing(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         del service.client.databases.query
         service.client.databases.retrieve.return_value = {
@@ -867,7 +890,7 @@ class NotionServiceTests(unittest.TestCase):
         service.client.data_sources.query.assert_called_once_with(data_source_id="source-123", page_size=100)
 
     def test_primary_data_source_id_returns_first_source(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         service.client.databases.retrieve.return_value = {
             "data_sources": [{"id": "source-123"}, {"id": "source-456"}],
@@ -878,24 +901,29 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(result, "source-123")
         service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
 
-    def test_verify_startup_disables_streaks_when_query_fails(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+    def test_verify_startup_disables_streaks_when_team_db_unreachable(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
-        service.client.databases.retrieve.return_value = {"properties": {}}
-        with patch.object(service, "_query_all", side_effect=RuntimeError("not shared")):
-            service.verify_startup()
+
+        def retrieve_side_effect(*, database_id: str):
+            if database_id == "team":
+                raise RuntimeError("not shared")
+            return {"properties": {}}
+
+        service.client.databases.retrieve.side_effect = retrieve_side_effect
+        service.verify_startup()
 
         self.assertFalse(service.streaks_available())
 
     def test_get_next_week_code_handles_year_boundaries(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         # Regular rollover
         self.assertEqual(service.get_next_week_code("26-W15"), "26-W16")
         # End of year 2026 (W53 is the last week of 2026)
         self.assertEqual(service.get_next_week_code("26-W53"), "27-W01")
 
     def test_get_current_week_infers_from_tasks_when_settings_db_is_absent(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {"properties": {"Week": {"type": "select", "select": {"name": "26-W18"}}, "Status": {"type": "select", "select": {"name": "Done"}}}},
             {"properties": {"Week": {"type": "select", "select": {"name": "26-W19"}}, "Status": {"type": "select", "select": {"name": "Todo"}}}},
@@ -906,7 +934,7 @@ class NotionServiceTests(unittest.TestCase):
             self.assertEqual(service.get_current_week_from_settings(), "26-W19")
 
     def test_set_current_week_in_settings_noops_when_settings_db_is_absent(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
 
         service.set_current_week_in_settings("26-W20", status="success", count=3)
@@ -914,7 +942,7 @@ class NotionServiceTests(unittest.TestCase):
         service.client.pages.update.assert_not_called()
 
     def test_set_is_current_week_flags_noops_when_property_is_absent(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         with patch.object(service, "_query_all", return_value=[{"id": "task-1", "properties": {}}]):
             with patch.object(service, "_retrieve_schema", return_value={"Week": {"type": "select"}}):
@@ -923,7 +951,7 @@ class NotionServiceTests(unittest.TestCase):
         service.client.pages.update.assert_not_called()
 
     def test_rollover_task_applies_correct_description_prefixes(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         service._retrieve_schema = MagicMock(return_value={
             "Week": {"type": "select"},
@@ -973,7 +1001,7 @@ class NotionServiceTests(unittest.TestCase):
         )
 
     def test_query_log_tasks_combines_done_today_and_current_week(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {
                 "id": "done-today",
@@ -1014,7 +1042,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(active_week, "26-W15")
 
     def test_query_log_tasks_falls_back_to_latest_week_and_legacy_done_tasks(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {
                 "id": "done-no-date",
@@ -1045,7 +1073,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(active_week, "26-W16")
 
     def test_query_log_tasks_excludes_tasks_done_on_other_days(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {
                 "id": "done-yesterday",
@@ -1076,7 +1104,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(active_week, "26-W16")
 
     def test_set_task_completion_checkbox_clears_done_date(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         service.client.databases.retrieve.return_value = {
             "properties": {
@@ -1101,7 +1129,7 @@ class NotionServiceTests(unittest.TestCase):
         )
 
     def test_set_task_completion_updates_status_and_done_checkbox_when_both_exist(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         service.client.databases.retrieve.return_value = {
             "properties": {
@@ -1130,7 +1158,7 @@ class NotionServiceTests(unittest.TestCase):
         )
 
     def test_has_daily_log_matches_founder_and_date_prefix(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         rows = [
             {
                 "properties": {
@@ -1145,7 +1173,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertTrue(result)
 
     def test_has_daily_log_matches_founder_from_title_when_property_is_absent(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         rows = [
             {
                 "properties": {
@@ -1160,7 +1188,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertTrue(result)
 
     def test_create_daily_log_builds_expected_properties(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", team_db_id="team")
         service.client = MagicMock()
         service.client.data_sources = None
 
@@ -1192,7 +1220,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["properties"]["Notes"]["rich_text"][0]["text"]["content"], "reflection")
 
     def test_create_daily_log_supports_title_only_founder_schema(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", team_db_id="team")
         service.client = MagicMock()
         service.client.data_sources = None
         schema = {
@@ -1220,7 +1248,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertNotIn("Week", kwargs["properties"])
 
     def test_daily_log_dates_returns_founder_dates(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", team_db_id="team")
         rows = [
             {
                 "properties": {
@@ -1241,7 +1269,7 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(dates, [dt.date(2026, 4, 28)])
 
     def test_update_streak_row_can_clear_last_log(self) -> None:
-        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", streaks_db_id="streaks")
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", team_db_id="team")
         service.client = MagicMock()
 
         service.update_streak_row(

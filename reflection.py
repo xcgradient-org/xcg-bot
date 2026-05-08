@@ -6,9 +6,37 @@ from urllib import error, request
 
 
 LOGGER = logging.getLogger("xcg_bot.reflection")
-DEFAULT_MODEL = "openai/gpt-oss-20b"
 DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
 DEFAULT_API_STYLE = "openai"
+
+# Per-key model priority lists. Key slot 0 is the primary API key, 1 is the
+# first fallback, 2 is the second. Each slot has 5 models in priority order so
+# the bot degrades gracefully under rate limits without repeating the same
+# model across slots.
+MODEL_PRIORITY_BY_KEY: dict[int, list[str]] = {
+    0: [  # primary key — prefer highest capability
+        "openai/gpt-oss-120b",
+        "llama-3.3-70b-versatile",
+        "qwen/qwen3-32b",
+        "openai/gpt-oss-20b",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+    ],
+    1: [  # fallback key 1 — balanced, avoids repeating slot-0 top pick
+        "llama-3.3-70b-versatile",
+        "openai/gpt-oss-120b",
+        "qwen/qwen3-32b",
+        "groq/compound",
+        "openai/gpt-oss-20b",
+    ],
+    2: [  # fallback key 2 — speed-optimised, lighter models first
+        "qwen/qwen3-32b",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "groq/compound-mini",
+        "openai/gpt-oss-20b",
+    ],
+}
+DEFAULT_MODEL = MODEL_PRIORITY_BY_KEY[0][0]
 SYSTEM_PROMPT = (
     "You are an EOD writing assistant for a B2B SaaS startup. "
     "Write a concise formal daily note in first person based on the completed tasks and notes provided. "
@@ -37,7 +65,7 @@ class ReflectionService:
             raise RuntimeError("Only OpenAI-compatible LLM APIs are supported. Local LLM and Gemini fallbacks are disabled.")
 
     def _headers(self, api_key: str | None = None) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": "xcg-bot/1.0"}
         key = api_key if api_key is not None else self.api_key
         if key:
             headers["Authorization"] = f"Bearer {key}"
@@ -82,18 +110,24 @@ class ReflectionService:
 
     def verify_startup(self) -> None:
         payload = self._get_json("/models")
-        models = {item.get("id", "").strip() for item in payload.get("data", [])}
-        if self.model not in models:
+        available = {item.get("id", "").strip() for item in payload.get("data", [])}
+        all_preferred = MODEL_PRIORITY_BY_KEY.get(0, [self.model])
+        reachable = [m for m in all_preferred if m in available]
+        if not reachable:
             raise RuntimeError(
-                f"Configured OpenAI-compatible model {self.model!r} is not available. "
-                f"Available models: {', '.join(sorted(model for model in models if model)) or 'none'}"
+                f"None of the preferred models are available. "
+                f"Preferred: {all_preferred}. "
+                f"Available: {', '.join(sorted(m for m in available if m)) or 'none'}"
             )
+        LOGGER.info("LLM startup: %d/%d preferred models available: %s", len(reachable), len(all_preferred), reachable)
 
     def _openai_request(
         self,
         *,
         system_prompt: str,
         user_prompt: str,
+        model: str,
+        api_key: str,
         response_mime_type: str | None = None,
         max_output_tokens: int = 400,
     ) -> dict:
@@ -103,7 +137,7 @@ class ReflectionService:
                 + "\n\nIMPORTANT: Your entire response must be valid JSON only. No markdown, no explanation."
             )
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -112,7 +146,7 @@ class ReflectionService:
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
-        return self._post_json("/chat/completions", payload)
+        return self._request_json_with_key("/chat/completions", method="POST", payload=payload, api_key=api_key)
 
     def _model_request(
         self,
@@ -122,12 +156,27 @@ class ReflectionService:
         response_mime_type: str | None = None,
         max_output_tokens: int = 400,
     ) -> dict:
-        return self._openai_request(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            response_mime_type=response_mime_type,
-            max_output_tokens=max_output_tokens,
-        )
+        keys = self.api_keys or ("",)
+        errors: list[str] = []
+        for key_idx, key in enumerate(keys):
+            models = MODEL_PRIORITY_BY_KEY.get(key_idx, [self.model])
+            for model in models:
+                try:
+                    result = self._openai_request(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        model=model,
+                        api_key=key,
+                        response_mime_type=response_mime_type,
+                        max_output_tokens=max_output_tokens,
+                    )
+                    if key_idx > 0 or model != models[0]:
+                        LOGGER.info("LLM succeeded with key #%s model=%s.", key_idx + 1, model)
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"key #{key_idx + 1} {model}: {exc}")
+                    LOGGER.warning("LLM failed with key #%s model=%s: %s", key_idx + 1, model, exc)
+        raise RuntimeError("All configured LLM key/model combinations failed: " + " | ".join(errors))
 
     def _extract_text(self, payload: dict) -> str:
         choices = payload.get("choices")

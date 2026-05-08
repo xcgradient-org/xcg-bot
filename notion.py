@@ -48,13 +48,14 @@ PROPERTY_ALIASES = {
 
 
 class NotionService:
-    def __init__(self, *, token: str, tasks_db_id: str, daily_logs_db_id: str, streaks_db_id: str, settings_db_id: str | None = None) -> None:
+    def __init__(self, *, token: str, tasks_db_id: str, daily_logs_db_id: str, team_db_id: str, settings_db_id: str | None = None) -> None:
         self.client = Client(auth=token)
         self.tasks_db_id = tasks_db_id
         self.daily_logs_db_id = daily_logs_db_id
-        self.streaks_db_id = streaks_db_id
+        self.team_db_id = team_db_id
         self.settings_db_id = settings_db_id
         self._streaks_available = True
+        self._team_member_cache: dict[str, str] = {}
 
     def verify_startup(self) -> None:
         try:
@@ -66,10 +67,10 @@ class NotionService:
             raise RuntimeError(f"Unable to reach required Notion databases: {exc}") from exc
 
         try:
-            self._query_all(self.streaks_db_id)
+            self.client.databases.retrieve(database_id=self.team_db_id)
         except Exception as exc:  # noqa: BLE001
             self._streaks_available = False
-            LOGGER.warning("Streaks database is unavailable; streak maintenance is disabled: %s", exc)
+            LOGGER.warning("Team database is unavailable; streak maintenance is disabled: %s", exc)
         else:
             self._streaks_available = True
 
@@ -173,7 +174,13 @@ class NotionService:
         founder_prop_name = self._existing_property_name(schema, "Founder")
         if founder_prop_name:
             used_names.add(founder_prop_name)
-            properties[founder_prop_name] = self._build_text_like_property_value(schema[founder_prop_name], founder_name)
+            founder_prop = schema[founder_prop_name]
+            if founder_prop.get("type") == "relation":
+                team_page_id = self.lookup_team_member_id(founder_name)
+                if team_page_id:
+                    properties[founder_prop_name] = {"relation": [{"id": team_page_id}]}
+            else:
+                properties[founder_prop_name] = self._build_text_like_property_value(founder_prop, founder_name)
 
         role_prop_name = self._existing_property_name(schema, "Role")
         if role_prop_name and role_prop_name not in used_names:
@@ -231,22 +238,22 @@ class NotionService:
 
     def get_streak_row(self, founder_name: str) -> dict[str, Any]:
         try:
-            rows = self._query_all(self.streaks_db_id)
+            rows = self._query_all(self.team_db_id)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to query streak rows: {exc}") from exc
+            raise RuntimeError(f"Failed to query team rows: {exc}") from exc
 
         matches = [row for row in rows if self._founder_matches_row(row, founder_name)]
         if not matches:
-            raise RuntimeError(f"No streak row found for founder {founder_name}.")
+            raise RuntimeError(f"No team row found for founder {founder_name}.")
         if len(matches) > 1:
-            raise RuntimeError(f"Multiple streak rows found for founder {founder_name}.")
+            raise RuntimeError(f"Multiple team rows found for founder {founder_name}.")
         return matches[0]
 
     def get_all_streak_rows(self) -> list[dict[str, Any]]:
         try:
-            return self._query_all(self.streaks_db_id)
+            return self._query_all(self.team_db_id)
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"Failed to query streak rows: {exc}") from exc
+            raise RuntimeError(f"Failed to query team rows: {exc}") from exc
 
     def update_streak_row(
         self,
@@ -256,7 +263,7 @@ class NotionService:
         best_streak: int | None,
         last_log_iso: str | None | object = UNSET,
     ) -> None:
-        schema = self._retrieve_schema(self.streaks_db_id)
+        schema = self._retrieve_schema(self.team_db_id)
         properties: dict[str, Any] = {}
 
         current_prop_name = self._existing_property_name(schema, "Current Streak") or "Current Streak"
@@ -298,7 +305,27 @@ class NotionService:
         return current, best, last_log
 
     def founder_name(self, row: dict[str, Any]) -> str:
-        return self._property_text(row, "Founder")
+        return self._property_text(row, "Founder") or self._page_title(row)
+
+    def lookup_team_member_id(self, founder_name: str) -> str | None:
+        key = str(founder_name or "").strip().lower()
+        if not key:
+            return None
+        if key in self._team_member_cache:
+            return self._team_member_cache[key]
+        try:
+            rows = self._query_all(self.team_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query Team DB for member lookup: %s", exc)
+            return None
+        for row in rows:
+            name = self._page_title(row)
+            if name.strip().lower() == key:
+                page_id = str(row.get("id") or "").strip()
+                if page_id:
+                    self._team_member_cache[key] = page_id
+                    return page_id
+        return None
 
     def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
         db_schema = self._retrieve_schema(self.tasks_db_id)
@@ -413,6 +440,7 @@ class NotionService:
         if not descriptions:
             return []
 
+        owner_team_page_id = self.lookup_team_member_id(founder_name) if founder_name else None
         display_ids = self.preview_task_ids(
             project_id=project_id,
             project_name=project_name,
@@ -430,6 +458,7 @@ class NotionService:
                 description=description,
                 role=role,
                 founder_name=founder_name,
+                owner_team_page_id=owner_team_page_id,
                 project_id=project_id,
                 year=year,
                 quarter_name=quarter_name,
@@ -438,12 +467,11 @@ class NotionService:
                 today_iso=today_iso,
             )
             try:
-                created_pages.append(
-                    self.client.pages.create(
-                        parent=self._build_parent(self.tasks_db_id),
-                        properties=properties,
-                    )
+                created_page = self.client.pages.create(
+                    parent=self._build_parent(self.tasks_db_id),
+                    properties=properties,
                 )
+                created_pages.append(created_page)
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"Failed to create task {display_id} in Notion: {exc}") from exc
         return created_pages
@@ -731,6 +759,7 @@ class NotionService:
         description: str,
         role: str,
         founder_name: str | None,
+        owner_team_page_id: str | None,
         project_id: str,
         year: int,
         quarter_name: str,
@@ -746,9 +775,16 @@ class NotionService:
         if prop := self._get_schema_property(schema, "Role"):
             prop_name = self._property_name(prop, "Role")
             properties[prop_name] = self._build_named_option_value(prop, role)
-        owner_prop_name = self._existing_property_name(schema, "Founder")
-        if founder_name and owner_prop_name and owner_prop_name not in properties:
-            properties[owner_prop_name] = self._build_text_like_property_value(schema[owner_prop_name], founder_name)
+        owner_prop_name = self._existing_property_name(schema, "Owner", "Founder")
+        if owner_prop_name and owner_prop_name not in properties:
+            owner_prop = schema[owner_prop_name]
+            if owner_prop.get("type") == "relation" and owner_team_page_id:
+                properties[owner_prop_name] = {"relation": [{"id": owner_team_page_id}]}
+            elif founder_name and owner_prop.get("type") != "relation":
+                try:
+                    properties[owner_prop_name] = self._build_text_like_property_value(owner_prop, founder_name)
+                except RuntimeError:
+                    pass
         if prop := self._get_schema_property(schema, "Project", "Projects"):
             prop_name = self._property_name(prop, "Project")
             properties[prop_name] = {"relation": [{"id": project_id}]}
@@ -904,13 +940,17 @@ class NotionService:
         return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
     def _task_owner_value(self, task: dict[str, Any]) -> str:
-        explicit_owner = (
-            self._property_text(task, "Role")
-            or self._property_text(task, "Founder")
-            or self._property_text(task, "Attendees")
-        )
-        if explicit_owner:
-            return explicit_owner
+        role_value = self._property_text(task, "Role")
+        if role_value:
+            return role_value
+
+        for candidate_name in ("Founder", "Attendees"):
+            prop = self._property(task, candidate_name)
+            if prop.get("type") == "relation":
+                continue
+            explicit_owner = self._property_text(task, candidate_name)
+            if explicit_owner:
+                return explicit_owner
 
         display_id = self.task_display_id(task)
         match = re.search(r"-(CEO|CTO|COO)-\d+$", display_id, flags=re.IGNORECASE)
@@ -989,7 +1029,8 @@ class NotionService:
         return self._week_matches(self._task_week_value(task), week_code)
 
     def _founder_matches_row(self, row: dict[str, Any], founder_name: str) -> bool:
-        value = self._property_text(row, "Founder")
+        # Check "Founder" alias first; fall back to page title for Team rows (title property is "Name")
+        value = self._property_text(row, "Founder") or self._page_title(row)
         if not value:
             return False
         tokens = {
@@ -1102,6 +1143,84 @@ class NotionService:
         properties[desc_prop_name] = {"rich_text": self._rich_text(new_desc_text)}
 
         self.client.pages.update(page_id=task["id"], properties=properties)
+
+    def count_tasks_for_week(self, week_code: str) -> int:
+        """Return the total number of tasks (done and incomplete) assigned to week_code."""
+        tasks = self._query_all(self.tasks_db_id)
+        return sum(1 for t in tasks if self._task_matches_week(t, week_code))
+
+    def remap_tasks_week(self, from_week: str, to_week: str) -> int:
+        """Move ALL tasks from from_week to to_week without touching descriptions or flags."""
+        tasks = self._query_all(self.tasks_db_id)
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        week_prop_name = "Week"
+        if prop := self._get_schema_property(db_schema, "Week"):
+            week_prop_name = self._property_name(prop, "Week")
+        count = 0
+        for task in tasks:
+            if not self._task_matches_week(task, from_week):
+                continue
+            self.client.pages.update(
+                page_id=task["id"],
+                properties={
+                    week_prop_name: self._build_scalar_property_value(
+                        db_schema.get(week_prop_name, {"type": "select"}), to_week
+                    )
+                },
+            )
+            count += 1
+        return count
+
+    def find_carryover_tasks_in_week(self, week_code: str) -> list[dict[str, Any]]:
+        """Return tasks in week_code that have a carryover or stale prefix (i.e. were moved by rollover)."""
+        tasks = self._query_all(self.tasks_db_id)
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        desc_prop_name = "Description"
+        if prop := self._get_schema_property(db_schema, "Description"):
+            desc_prop_name = self._property_name(prop, "Description")
+        result = []
+        for task in tasks:
+            if not self._task_matches_week(task, week_code):
+                continue
+            desc_objs = task.get("properties", {}).get(desc_prop_name, {}).get("rich_text", [])
+            desc_text = "".join(obj.get("plain_text", "") for obj in desc_objs)
+            if desc_text.startswith("↩ carryover | ") or desc_text.startswith("⚠ stale | "):
+                result.append(task)
+        return result
+
+    def rollback_rollover(self, from_week: str, to_week: str) -> int:
+        """Undo a rollover: move tasks from to_week back to from_week, stripping carryover prefixes."""
+        tasks = self._query_all(self.tasks_db_id)
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        week_prop_name = "Week"
+        if prop := self._get_schema_property(db_schema, "Week"):
+            week_prop_name = self._property_name(prop, "Week")
+        desc_prop_name = "Description"
+        if prop := self._get_schema_property(db_schema, "Description"):
+            desc_prop_name = self._property_name(prop, "Description")
+        carryover_prefix = "↩ carryover | "
+        stale_prefix = "⚠ stale | "
+        count = 0
+        for task in tasks:
+            if not self._task_matches_week(task, to_week):
+                continue
+            desc_objs = task.get("properties", {}).get(desc_prop_name, {}).get("rich_text", [])
+            desc_text = "".join(obj.get("plain_text", "") for obj in desc_objs)
+            if desc_text.startswith(carryover_prefix):
+                restored = desc_text[len(carryover_prefix):]
+            elif desc_text.startswith(stale_prefix):
+                restored = carryover_prefix + desc_text[len(stale_prefix):]
+            else:
+                continue
+            properties = {
+                week_prop_name: self._build_scalar_property_value(
+                    db_schema.get(week_prop_name, {"type": "select"}), from_week
+                ),
+                desc_prop_name: {"rich_text": self._rich_text(restored)},
+            }
+            self.client.pages.update(page_id=task["id"], properties=properties)
+            count += 1
+        return count
 
     def set_is_current_week_flags(self, from_week: str, to_week: str) -> None:
         tasks = self._query_all(self.tasks_db_id)

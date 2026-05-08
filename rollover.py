@@ -33,7 +33,7 @@ def main() -> None:
             token=settings.notion_token,
             tasks_db_id=settings.notion_tasks_db_id,
             daily_logs_db_id=settings.notion_daily_logs_db_id,
-            streaks_db_id=settings.notion_streaks_db_id,
+            team_db_id=settings.notion_team_db_id,
             settings_db_id=settings.notion_settings_db_id,
         )
 

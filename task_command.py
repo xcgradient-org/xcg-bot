@@ -4,7 +4,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime
 from typing import Any
 
 import discord
@@ -14,7 +14,6 @@ from log_command import MADRID_TZ, current_context, founder_mapping
 
 
 LOGGER = logging.getLogger("xcg_bot.task_command")
-TASK_WEEK_ROLLOVER_TIME = time(17, 0)
 MONTH_NAMES = [
     "Jan",
     "Feb",
@@ -294,12 +293,6 @@ def _task_creation_week_code(now: datetime | None = None) -> str:
         local_now = MADRID_TZ.localize(local_now)
     else:
         local_now = local_now.astimezone(MADRID_TZ)
-
-    weekday = local_now.weekday()
-    after_rollover = weekday > 4 or (weekday == 4 and local_now.time() >= TASK_WEEK_ROLLOVER_TIME)
-    if after_rollover:
-        local_now = local_now + timedelta(days=3)
-
     iso_year, iso_week, _ = local_now.isocalendar()
     return f"{iso_year % 100:02d}-W{iso_week:02d}"
 
