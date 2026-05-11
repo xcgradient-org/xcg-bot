@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from notion_client import Client
@@ -1052,9 +1053,26 @@ class NotionService:
             return ""
         return title.split("·", 1)[0].strip()
 
+    _WEEK_STATE_FILE = Path(__file__).resolve().parent / ".week_state"
+    _WEEK_STATE_DEFAULT = "26-W19"
+
+    def _read_week_state(self) -> str:
+        try:
+            text = self._WEEK_STATE_FILE.read_text().strip()
+            if re.match(r"^\d{2}-W\d{1,2}$", text):
+                return text
+            LOGGER.warning("Malformed .week_state content %r; using default %s", text, self._WEEK_STATE_DEFAULT)
+        except FileNotFoundError:
+            LOGGER.info(".week_state not found; using default %s", self._WEEK_STATE_DEFAULT)
+        return self._WEEK_STATE_DEFAULT
+
+    def _write_week_state(self, week_code: str) -> None:
+        self._WEEK_STATE_FILE.write_text(week_code + "\n")
+        LOGGER.info("Wrote week state: %s → %s", self._WEEK_STATE_FILE, week_code)
+
     def get_current_week_from_settings(self) -> str:
         if not self.settings_db_id:
-            return self._infer_current_week_from_tasks()
+            return self._read_week_state()
         rows = self._query_all(self.settings_db_id)
         if not rows:
             raise RuntimeError("Settings database is empty.")
@@ -1066,7 +1084,10 @@ class NotionService:
 
     def set_current_week_in_settings(self, week_code: str, status: str, count: int) -> None:
         if not self.settings_db_id:
-            LOGGER.info("Settings database ID not configured; skipping current week settings update.")
+            if status == "success":
+                self._write_week_state(week_code)
+            else:
+                LOGGER.info("Rollover status=%s; not advancing local week state.", status)
             return
         rows = self._query_all(self.settings_db_id)
         if not rows:
@@ -1113,16 +1134,13 @@ class NotionService:
             and not self._is_task_archived(task)
         ]
 
-    def rollover_task(self, task: dict[str, Any], to_week: str) -> None:
-        db_schema = self._retrieve_schema(self.tasks_db_id)
+    def _rollover_task_with_schema(self, task: dict[str, Any], to_week: str, db_schema: dict[str, Any]) -> None:
         properties: dict[str, Any] = {}
 
-        # Update Week
         if prop := self._get_schema_property(db_schema, "Week"):
             prop_name = self._property_name(prop, "Week")
             properties[prop_name] = self._build_scalar_property_value(prop, to_week)
 
-        # Update Description prefix
         desc_prop_name = "Description"
         if prop := self._get_schema_property(db_schema, "Description"):
             desc_prop_name = self._property_name(prop, "Description")
@@ -1134,15 +1152,23 @@ class NotionService:
         stale_prefix = "⚠ stale | "
 
         if current_desc_text.startswith(carryover_prefix):
-            new_desc_text = stale_prefix + current_desc_text[len(carryover_prefix) :]
+            new_desc_text = stale_prefix + current_desc_text[len(carryover_prefix):]
         elif not current_desc_text.startswith(stale_prefix):
             new_desc_text = carryover_prefix + current_desc_text
         else:
-            new_desc_text = current_desc_text  # Already stale, keep as is
+            new_desc_text = current_desc_text
 
         properties[desc_prop_name] = {"rich_text": self._rich_text(new_desc_text)}
-
         self.client.pages.update(page_id=task["id"], properties=properties)
+
+    def rollover_task(self, task: dict[str, Any], to_week: str) -> None:
+        self._rollover_task_with_schema(task, to_week, self._retrieve_schema(self.tasks_db_id))
+
+    def rollover_tasks_batch(self, tasks: list[dict[str, Any]], to_week: str) -> None:
+        """Roll over multiple tasks, fetching the schema only once."""
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        for task in tasks:
+            self._rollover_task_with_schema(task, to_week, db_schema)
 
     def count_tasks_for_week(self, week_code: str) -> int:
         """Return the total number of tasks (done and incomplete) assigned to week_code."""

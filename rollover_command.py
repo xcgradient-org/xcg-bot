@@ -44,8 +44,7 @@ class _RolloverView(discord.ui.View):
             tasks_to_move = await asyncio.to_thread(
                 self.notion.find_incomplete_tasks_for_week, self.from_week
             )
-            for task in tasks_to_move:
-                await asyncio.to_thread(self.notion.rollover_task, task, self.to_week)
+            await asyncio.to_thread(self.notion.rollover_tasks_batch, tasks_to_move, self.to_week)
             await asyncio.to_thread(
                 self.notion.set_is_current_week_flags, self.from_week, self.to_week
             )
