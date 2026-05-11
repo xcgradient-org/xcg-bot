@@ -1481,18 +1481,32 @@ async function pushTasks() {
         project_id: state.project.id,
         project_name: state.project.name,
         week_code: state.weekCode,
-        descriptions: state.tasks.map(t => t.text.trim()).filter(Boolean)
+        descriptions: state.tasks.map(t => t.text.trim()).filter(Boolean),
+        display_ids: state.tasks.filter(t => t.text.trim()).map(t => t.notionId).filter(Boolean)
       }),
-      signal: AbortSignal.timeout(60000)
+      signal: AbortSignal.timeout(120000)
     });
-    if (!r.ok) throw new Error("non-200");
-    result = await r.json();
+    const payload = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(payload.error || `Request failed with ${r.status}`);
+    result = payload;
     state.online.push = true;
   } catch (e) {
-    demo = true;
     state.online.push = false;
     setConnState(false);
-    result = { created: state.tasks.length };
+    out.innerHTML = `
+      <div class="demo-mode-banner">
+        <span class="icon">!</span>
+        <div>
+          <b>Push failed — nothing was pushed.</b><br/>
+          ${escapeHtml(e.message || "The Notion backend did not complete the request.")}
+          <div style="margin-top:10px; display:flex; gap:8px;">
+            <button class="btn btn-secondary" type="button" onclick="pushTasks()">Try again</button>
+          </div>
+        </div>
+      </div>`;
+    label.textContent = "Push to Notion";
+    btn.disabled = false;
+    return;
   }
 
   label.textContent = "Push to Notion";

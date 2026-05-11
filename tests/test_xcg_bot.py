@@ -721,6 +721,7 @@ class NotionTaskCreationTests(unittest.TestCase):
             "Quarter": {"type": "select", "select": {"options": [{"name": "Q2 2026"}]}},
             "Month": {"type": "select", "select": {"options": [{"name": "Apr"}]}},
             "Week": {"type": "select", "select": {"options": [{"name": "26-W16"}]}},
+            "Is Current Week": {"type": "checkbox"},
             "Status": {"type": "checkbox"},
             "Done": {"type": "checkbox"},
             "Done date": {"type": "date"},
@@ -743,6 +744,7 @@ class NotionTaskCreationTests(unittest.TestCase):
                         month_name="Apr",
                         week_code="26-W16",
                         today_iso="2026-04-16",
+                        is_current_week=True,
                     )
 
         create_calls = service.client.pages.create.call_args_list
@@ -766,6 +768,7 @@ class NotionTaskCreationTests(unittest.TestCase):
         self.assertEqual(first_kwargs["properties"]["Quarter"]["select"]["name"], "Q2 2026")
         self.assertEqual(first_kwargs["properties"]["Month"]["select"]["name"], "Apr")
         self.assertEqual(first_kwargs["properties"]["Week"]["select"]["name"], "26-W16")
+        self.assertTrue(first_kwargs["properties"]["Is Current Week"]["checkbox"])
         self.assertFalse(first_kwargs["properties"]["Status"]["checkbox"])
         self.assertFalse(first_kwargs["properties"]["Done"]["checkbox"])
         self.assertIsNone(first_kwargs["properties"]["Done date"]["date"])

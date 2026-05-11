@@ -437,19 +437,22 @@ class NotionService:
         month_name: str,
         week_code: str,
         today_iso: str,
+        display_ids: list[str] | None = None,
+        is_current_week: bool = False,
     ) -> list[dict[str, Any]]:
         if not descriptions:
             return []
 
         owner_team_page_id = self.lookup_team_member_id(founder_name) if founder_name else None
-        display_ids = self.preview_task_ids(
-            project_id=project_id,
-            project_name=project_name,
-            role=role,
-            year=year,
-            quarter_name=quarter_name,
-            count=len(descriptions),
-        )
+        if display_ids is None or len(display_ids) != len(descriptions):
+            display_ids = self.preview_task_ids(
+                project_id=project_id,
+                project_name=project_name,
+                role=role,
+                year=year,
+                quarter_name=quarter_name,
+                count=len(descriptions),
+            )
         schema = self._retrieve_schema(self.tasks_db_id)
         created_pages = []
         for display_id, description in zip(display_ids, descriptions, strict=False):
@@ -466,6 +469,7 @@ class NotionService:
                 month_name=month_name,
                 week_code=week_code,
                 today_iso=today_iso,
+                is_current_week=is_current_week,
             )
             try:
                 created_page = self.client.pages.create(
@@ -767,6 +771,7 @@ class NotionService:
         month_name: str,
         week_code: str,
         today_iso: str,
+        is_current_week: bool = False,
     ) -> dict[str, Any]:
         properties: dict[str, Any] = {}
 
@@ -814,6 +819,10 @@ class NotionService:
             prop_name = self._property_name(prop, "Sprint week")
             sprint_week = week_code.split("-")[-1]
             properties[prop_name] = self._build_scalar_property_value(prop, sprint_week)
+        if prop := self._get_schema_property(schema, "Is Current Week"):
+            prop_name = self._property_name(prop, "Is Current Week")
+            if prop.get("type") == "checkbox":
+                properties[prop_name] = {"checkbox": bool(is_current_week)}
         if prop := self._get_schema_property(schema, "Status"):
             prop_name = self._property_name(prop, "Status")
             status_type = prop.get("type")
