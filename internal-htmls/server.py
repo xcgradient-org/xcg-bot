@@ -62,6 +62,8 @@ MEETING_PARSE_PROMPT = (
     "title, date_iso, type, attendees, location, notes_enhanced. "
     "date_iso must be ISO 8601 with timezone offset for Europe/Madrid. "
     "Resolve relative dates using the provided today's date. Default time to 10:00 if no time is provided. "
+    "If the date input contains only a time or time range, use today's date and the start time. "
+    "For time ranges such as 18-18:30, 18:00-18:30, or 5-5:30pm, set date_iso to the start datetime. "
     "attendees must be an array of strings. Do not add markdown or commentary."
 )
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -76,6 +78,12 @@ TIME_RE = re.compile(
 )
 TIME_FIRST_RE = re.compile(
     r"^(?:at\s+)?(?P<hour>\d{1,2})(?:(?::|h|\.)(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?\s+",
+    re.IGNORECASE,
+)
+TIME_RANGE_RE = re.compile(
+    r"^(?P<before>.*?)(?<!\d)(?P<start_hour>\d{1,2})(?:(?::|h|\.)(?P<start_minute>\d{2}))?\s*"
+    r"(?P<start_ampm>am|pm)?\s*(?:-|–|—|\bto\b|\buntil\b)\s*"
+    r"(?P<end_hour>\d{1,2})(?:(?::|h|\.)(?P<end_minute>\d{2}))?\s*(?P<end_ampm>am|pm)?(?P<after>.*)$",
     re.IGNORECASE,
 )
 ROLE_TO_ENV = {
@@ -208,10 +216,10 @@ def _format_datetime_label(date_iso: str) -> str:
     return f"{WEEKDAYS[parsed.weekday()]} {parsed.day} {MONTHS[parsed.month - 1]}, {parsed.strftime('%H:%M')}"
 
 
-def _time_from_match(match: re.Match[str]) -> tuple[int, int] | None:
-    hour = int(match.group("hour"))
-    minute = int(match.group("minute") or "0")
-    ampm = str(match.group("ampm") or "").lower()
+def _parse_time_parts(hour_text: str, minute_text: str | None = None, ampm_text: str | None = None) -> tuple[int, int] | None:
+    hour = int(hour_text)
+    minute = int(minute_text or "0")
+    ampm = str(ampm_text or "").lower()
     if ampm == "pm" and hour < 12:
         hour += 12
     elif ampm == "am" and hour == 12:
@@ -219,6 +227,25 @@ def _time_from_match(match: re.Match[str]) -> tuple[int, int] | None:
     if hour > 23 or minute > 59:
         return None
     return hour, minute
+
+
+def _time_from_match(match: re.Match[str]) -> tuple[int, int] | None:
+    return _parse_time_parts(match.group("hour"), match.group("minute"), match.group("ampm"))
+
+
+def _try_parse_time_range_datetime(raw_value: str, *, base_now: datetime) -> str | None:
+    match = TIME_RANGE_RE.match(raw_value)
+    if not match:
+        return None
+    start_ampm = match.group("start_ampm") or match.group("end_ampm")
+    parsed_time = _parse_time_parts(match.group("start_hour"), match.group("start_minute"), start_ampm)
+    if parsed_time is None:
+        return None
+    hour, minute = parsed_time
+    before = str(match.group("before") or "").strip()
+    after = str(match.group("after") or "").strip()
+    start_text = " ".join(part for part in (before, f"{hour:02d}:{minute:02d}", after) if part)
+    return _try_parse_relative_datetime(start_text, base_now=base_now)
 
 
 def _try_parse_relative_datetime(raw_value: str, *, base_now: datetime) -> str | None:
@@ -309,6 +336,9 @@ def _try_parse_user_datetime(raw_value: str, *, default_year: int, base_now: dat
     else:
         current = current.astimezone(MADRID_TZ)
 
+    if time_range := _try_parse_time_range_datetime(value, base_now=current):
+        return time_range
+
     if relative := _try_parse_relative_datetime(value, base_now=current):
         return relative
 
@@ -336,16 +366,16 @@ def _try_parse_user_datetime(raw_value: str, *, default_year: int, base_now: dat
 
 def _normalize_meeting_payload(raw_input: dict[str, Any], ai_payload: dict[str, Any] | None) -> dict[str, Any]:
     now = datetime.now(MADRID_TZ)
-    fallback_date = _try_parse_user_datetime(str(raw_input.get("date_input") or ""), default_year=now.year, base_now=now)
-    if not fallback_date:
-        raise ValueError("Could not parse meeting date. Try a format like 'tomorrow 10:00' or '2026-05-20 15:00'.")
-
     payload = ai_payload if isinstance(ai_payload, dict) else {}
+    fallback_date = _try_parse_user_datetime(str(raw_input.get("date_input") or ""), default_year=now.year, base_now=now)
     ai_date_raw = str(payload.get("date_iso") or "").strip()
+    date_iso = ""
     try:
-        date_iso = _normalize_date_iso(ai_date_raw) if ai_date_raw else fallback_date
+        date_iso = _normalize_date_iso(ai_date_raw) if ai_date_raw else ""
     except Exception:  # noqa: BLE001
-        date_iso = fallback_date
+        date_iso = _try_parse_user_datetime(ai_date_raw, default_year=now.year, base_now=now) or ""
+    if not date_iso:
+        date_iso = fallback_date or MADRID_TZ.localize(datetime(now.year, now.month, now.day, 10, 0)).isoformat()
 
     title = str(payload.get("title") or raw_input.get("title") or "").strip()
     meeting_type = str(payload.get("type") or raw_input.get("type") or "Other").strip()
