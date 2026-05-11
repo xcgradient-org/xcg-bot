@@ -356,6 +356,26 @@
     color: var(--ink-2);
   }
   .week-hint.is-warn { color: var(--warn); }
+  .week-suggestions {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 10px;
+  }
+  .week-suggestion {
+    min-height: 36px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--card);
+    color: var(--ink-2);
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .04em;
+    transition: border-color .12s, background .12s, transform .12s;
+  }
+  .week-suggestion:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+  .week-suggestion.is-selected { border-color: var(--ink); background: #fff; color: var(--ink); }
 
   /* CTA */
   .cta-row {
@@ -783,6 +803,23 @@
     border-radius: 8px;
     padding: 10px 14px;
   }
+  .home-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--ink-2);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    text-decoration: none;
+  }
+  .home-btn:hover { border-color: var(--ink); background: #fff; }
 
   @media (max-width: 720px) {
     .bar-inner { grid-template-columns: 1fr auto; }
@@ -814,6 +851,7 @@
       <div class="step" data-step="3"><span class="num"><span>03</span></span><span>Review</span></div>
     </nav>
     <div class="week-pill">
+      <a class="home-btn" href="/">Home</a>
       <span class="conn is-online" id="conn"><span class="dot"></span><span id="connLabel">Live</span></span>
       <span class="label">This week</span>
       <span class="code" id="thisWeek">—</span>
@@ -877,15 +915,16 @@
       </div>
       <div class="week-row">
         <input type="text" class="input mono" id="weekInput" spellcheck="false" autocomplete="off" />
-        <button class="ghost-btn" id="resetWeekBtn" type="button" title="Reset to next week">
+        <button class="ghost-btn" id="resetWeekBtn" type="button" title="Reset to this calendar week">
           <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7a5 5 0 0 1 9-3"/><path d="M11 1.5V4H8.5"/><path d="M12 7a5 5 0 0 1-9 3"/><path d="M3 12.5V10h2.5"/></svg>
-          Next week
+          Current week
         </button>
       </div>
       <div class="week-hint" id="weekHint">
-        <span class="badge">Default</span>
-        <span id="weekHintText">Computed from today's date.</span>
+        <span class="badge">Current</span>
+        <span id="weekHintText">Default is the calendar week right now.</span>
       </div>
+      <div class="week-suggestions" id="weekSuggestions"></div>
     </div>
 
     <div class="cta-row">
@@ -1029,6 +1068,11 @@ function nextWeekCode(from = new Date()) {
   d.setDate(d.getDate() + 7);
   return fmtWeekCode(isoWeekParts(d));
 }
+function offsetWeekCode(offset, from = new Date()) {
+  const d = new Date(from);
+  d.setDate(d.getDate() + (offset * 7));
+  return fmtWeekCode(isoWeekParts(d));
+}
 function thisWeekCode(from = new Date()) {
   return fmtWeekCode(isoWeekParts(from));
 }
@@ -1118,9 +1162,10 @@ $("#projectSelect").addEventListener("change", e => {
 function initWeek() {
   state.thisWeekCode = thisWeekCode();
   $("#thisWeek").textContent = state.thisWeekCode;
-  state.weekCode = nextWeekCode();
+  state.weekCode = state.thisWeekCode;
   $("#weekInput").value = state.weekCode;
   updateWeekHint(true);
+  renderWeekSuggestions();
 }
 function updateWeekHint(isDefault) {
   const hint = $("#weekHint");
@@ -1130,15 +1175,36 @@ function updateWeekHint(isDefault) {
     hint.classList.add("is-warn");
     hint.querySelector(".badge").textContent = "Invalid";
     text.textContent = "Use YY-WNN, e.g. 26-W21.";
-  } else if (isDefault || v === nextWeekCode()) {
+  } else if (isDefault || v === state.thisWeekCode) {
     hint.classList.remove("is-warn");
-    hint.querySelector(".badge").textContent = "Default";
-    text.textContent = "Computed as next week from today.";
+    hint.querySelector(".badge").textContent = "Current";
+    text.textContent = "Default is the calendar week right now.";
   } else {
     hint.classList.remove("is-warn");
     hint.querySelector(".badge").textContent = "Custom";
     text.textContent = "Custom target week — make sure this is what you want.";
   }
+  updateWeekSuggestionSelection();
+}
+function renderWeekSuggestions() {
+  const root = $("#weekSuggestions");
+  const labels = ["This week", "+1 week", "+2 weeks", "+3 weeks"];
+  root.innerHTML = labels.map((label, offset) => {
+    const code = offsetWeekCode(offset);
+    return `<button class="week-suggestion" type="button" data-week="${code}">${label} · ${code}</button>`;
+  }).join("");
+  $$(".week-suggestion", root).forEach(btn => {
+    btn.addEventListener("click", () => {
+      state.weekCode = btn.dataset.week;
+      $("#weekInput").value = state.weekCode;
+      updateWeekHint(state.weekCode === state.thisWeekCode);
+      checkPhase1Ready();
+    });
+  });
+  updateWeekSuggestionSelection();
+}
+function updateWeekSuggestionSelection() {
+  $$(".week-suggestion").forEach(btn => btn.classList.toggle("is-selected", btn.dataset.week === state.weekCode));
 }
 $("#weekInput").addEventListener("input", e => {
   state.weekCode = e.target.value.toUpperCase();
@@ -1147,7 +1213,7 @@ $("#weekInput").addEventListener("input", e => {
   checkPhase1Ready();
 });
 $("#resetWeekBtn").addEventListener("click", () => {
-  state.weekCode = nextWeekCode();
+  state.weekCode = state.thisWeekCode;
   $("#weekInput").value = state.weekCode;
   updateWeekHint(true);
   checkPhase1Ready();

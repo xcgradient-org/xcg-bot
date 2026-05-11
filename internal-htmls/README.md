@@ -1,22 +1,37 @@
-# Internal HTML Tools
+# Internal Tools
 
-This folder contains the Notion-backed internal versions of the two root HTML mockups:
+This folder contains the React internal tools and the Python backend that talks to Notion, the LLM parser, and Discord.
 
-- `task creator/index.html`
-- `okr creator/index.html`
-
-Run the local server from the repo root:
+Build the frontend:
 
 ```bash
-python internal-htmls/server.py
+cd internal-htmls/app
+npm install
+npm run build
 ```
+
+Run the server from the repo root:
+
+```bash
+make -C internal-htmls online HOST=127.0.0.1 PORT=8012
+```
+
+This builds the React app, kills any previous server on that port, starts a new background server, and writes logs to `internal-htmls/internal-server.log`.
 
 Then open:
 
-- `http://127.0.0.1:8012/task%20creator/`
-- `http://127.0.0.1:8012/okr%20creator/`
+- Home: `http://127.0.0.1:8012/`
+- Task Creator: `http://127.0.0.1:8012/task-creator`
+- OKR Creator: `http://127.0.0.1:8012/okr-creator`
+- Meeting Creator: `http://127.0.0.1:8012/meeting-creator`
+- Log Creator: `http://127.0.0.1:8012/log-creator`
 
-The server keeps `NOTION_TOKEN` server-side and exposes only the small API surface the HTMLs already call:
+The old URLs still redirect when the React build exists:
+
+- `/task creator/`
+- `/okr creator/`
+
+API routes:
 
 - `GET /api/projects`
 - `POST /api/parse`
@@ -24,24 +39,28 @@ The server keeps `NOTION_TOKEN` server-side and exposes only the small API surfa
 - `POST /api/tasks`
 - `POST /api/okr/parse-krs`
 - `POST /api/okr/push`
+- `POST /api/meetings/parse`
+- `POST /api/meetings`
+- `GET /api/current-week`
+- `GET /api/week`
+- `POST /api/week/rollover`
+- `POST /api/log/preview`
+- `POST /api/log`
 
 Required environment variables are loaded from the repo `.env`:
 
 - `NOTION_TOKEN`
 - `NOTION_TASKS_DB_ID` or `NOTION_TASKS_DB`
 - `NOTION_TEAM_DB_ID` or `NOTION_TEAM_DB`
+- `NOTION_MEETINGS_DB_ID` or `NOTION_MEETINGS_DB`
+- `DISCORD_TOKEN`
+- `DISCORD_ANNOUNCEMENTS_CHANNEL_ID`
 
 Optional overrides:
 
 - `INTERNAL_HTMLS_HOST`
+- `INTERNAL_HTMLS_PORT`
 - `NOTION_OBJECTIVES_DB_ID` or `NOTION_OBJECTIVES_DB`
 - `NOTION_KRS_DB_ID` or `NOTION_KRS_DB`
-- `INTERNAL_HTMLS_PORT`
 
-If the OKR database IDs are not set, the server uses the IDs documented in `NOTION_DATABASES.md`.
-
-To expose the tools to colleagues over Tailscale, bind to this machine's Tailscale IP:
-
-```bash
-INTERNAL_HTMLS_HOST=100.72.248.102 INTERNAL_HTMLS_PORT=8013 python internal-htmls/server.py
-```
+For `internal.xcgradient.com`, run the server on `127.0.0.1` and point Cloudflare Tunnel to `http://127.0.0.1:8013`, then protect the hostname with Cloudflare Access.

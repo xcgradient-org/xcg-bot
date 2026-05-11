@@ -1,0 +1,3 @@
+.internal-server.pid
+internal-server.log
+__pycache__/

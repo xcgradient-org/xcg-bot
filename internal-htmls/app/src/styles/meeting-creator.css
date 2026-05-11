@@ -1,0 +1,170 @@
+.meeting-pill {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.meeting-pill .label {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.meeting-pill .code {
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: var(--ink);
+  color: var(--paper);
+  font-weight: 500;
+}
+.seg {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+.seg button {
+  min-height: 48px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 8px;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-weight: 600;
+}
+.seg button.is-active {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+.mode-seg {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.meeting-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.meeting-wide { grid-column: 1 / -1; }
+.meeting-review {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 18px;
+}
+.meeting-review h2 {
+  margin: 0 0 10px;
+  font-size: 23px;
+  letter-spacing: -0.015em;
+}
+.meeting-review dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 10px 16px;
+  margin: 0;
+}
+.meeting-review dt {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.meeting-review dd {
+  margin: 0;
+  color: var(--ink-2);
+}
+.meeting-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rollover-task-list {
+  margin-top: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+}
+.rollover-task-list .task-list-head,
+.rollover-task-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.rollover-task-list .task-list-head {
+  background: var(--paper-2);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.rollover-task-row:last-of-type {
+  border-bottom: 0;
+}
+.rollover-more {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.log-task-list {
+  margin-bottom: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  overflow: hidden;
+}
+.log-task {
+  display: grid;
+  grid-template-columns: 22px 130px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: background .12s;
+}
+.log-task:last-child {
+  border-bottom: 0;
+}
+.log-task.is-selected {
+  background: color-mix(in oklch, var(--accent-soft) 70%, var(--card));
+}
+.log-task input,
+.log-toggle input {
+  accent-color: var(--accent-deep);
+}
+.log-task .task-id {
+  font-family: var(--mono);
+  color: var(--muted);
+  font-size: 12px;
+}
+.log-empty {
+  padding: 16px;
+  color: var(--muted);
+}
+.log-notes {
+  display: block;
+}
+.log-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .meeting-grid, .seg { grid-template-columns: 1fr; }
+  .meeting-pill { display: none; }
+  .meeting-review dl { grid-template-columns: 1fr; }
+  .log-task { grid-template-columns: 22px 1fr; }
+  .log-task .task-id { grid-column: 2; }
+}
