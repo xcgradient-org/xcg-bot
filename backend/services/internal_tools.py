@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
 
 from notion import NotionService  # noqa: E402
 from reflection import ReflectionService  # noqa: E402
-from log_command import build_blocker_message, current_context, rewrite_blocker_message  # noqa: E402
+from bot.commands.log_command import build_blocker_message, current_context, rewrite_blocker_message  # noqa: E402
 from streaks import sync_founder_streak_from_daily_logs  # noqa: E402
 
 

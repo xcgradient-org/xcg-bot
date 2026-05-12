@@ -6,15 +6,15 @@ import discord
 from discord.ext import commands
 
 from backend.config import Settings, configure_logging, load_environment, load_settings, default_llm_settings
-from blocker_command import register_blocker_command
-from log_command import register_log_command
-from meeting_command import register_meeting_command
-from meetings import start_meeting_reminder_poller, start_new_meeting_poller
+from bot.commands.blocker_command import register_blocker_command
+from bot.commands.log_command import register_log_command
+from bot.commands.meeting_command import register_meeting_command
+from bot.commands.meetings import start_meeting_reminder_poller, start_new_meeting_poller
 from notion import NotionService
 from reflection import ReflectionService
-from rollover_command import register_rollover_command
+from bot.commands.rollover_command import register_rollover_command
 from streaks import start_daily_reset_task
-from task_command import register_task_command
+from bot.commands.task_command import register_task_command
 
 
 LOGGER = logging.getLogger("xcg_internal.bot")
