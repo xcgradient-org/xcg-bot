@@ -245,7 +245,7 @@ export default function MeetingCreator() {
         <section className={`phase ${phase === 3 ? "is-active" : ""}`}>
           <div className="phase-head">
             <h1><span className="num">03</span>Review and announce</h1>
-            <div className="blurb">This will create the Notion meeting and post the announcement in Discord.</div>
+            <div className="blurb">This will create the Notion meeting, attendee tasks, and Discord announcement.</div>
           </div>
 
           {parsed ? (
@@ -271,6 +271,8 @@ export default function MeetingCreator() {
               <div>
                 <h3>Meeting created.</h3>
                 <p>Notion page created{result.announced ? " and Discord announcement posted." : ", but Discord announcement did not complete."}</p>
+                <p>{result.attendance_tasks_created || 0} attendance task{result.attendance_tasks_created === 1 ? "" : "s"} created.</p>
+                {result.attendance_task_error ? <p className="confirm-warning">Attendance task error: {result.attendance_task_error}</p> : null}
               </div>
             </div>
           ) : null}

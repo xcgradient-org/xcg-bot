@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import importlib.util
 from pathlib import Path
 import datetime as dt
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -20,6 +21,14 @@ import notion
 import reflection
 import streaks
 import task_command
+
+INTERNAL_SERVER_SPEC = importlib.util.spec_from_file_location(
+    "internal_htmls_server",
+    BOT_DIR / "internal-htmls" / "server.py",
+)
+internal_server = importlib.util.module_from_spec(INTERNAL_SERVER_SPEC)
+assert INTERNAL_SERVER_SPEC.loader is not None
+INTERNAL_SERVER_SPEC.loader.exec_module(internal_server)
 
 
 class LoadSettingsTests(unittest.TestCase):
@@ -478,6 +487,53 @@ class MeetingCommandTests(unittest.TestCase):
         self.assertIn("Client — Tuesday 14 April, 10:00", message)
         self.assertNotIn("📝", message)
         self.assertIn("Posted in #announcements.", message)
+
+
+class InternalMeetingCreatorTests(unittest.TestCase):
+    def test_week_context_for_date_uses_meeting_week(self) -> None:
+        year, week, week_code, quarter_name = internal_server._week_context_for_date("2026-05-12T10:00:00+02:00")
+
+        self.assertEqual(year, 2026)
+        self.assertEqual(week, 20)
+        self.assertEqual(week_code, "26-W20")
+        self.assertEqual(quarter_name, "Q2 2026")
+
+    def test_create_meeting_attendance_tasks_creates_one_task_per_attendee(self) -> None:
+        app = internal_server.InternalNotionApp.__new__(internal_server.InternalNotionApp)
+        app.meeting_task_project_id = ""
+        app.meeting_task_project_name = "ALPHA"
+        app.notion = MagicMock()
+        app.notion.list_projects.return_value = [{"id": "project-alpha", "name": "ALPHA"}]
+        app.notion.get_current_week_from_settings.return_value = "26-W20"
+        app.notion._week_matches.side_effect = lambda left, right: left == right
+
+        create_calls: list[dict[str, object]] = []
+
+        def create_tasks_batch(**kwargs: object) -> list[dict[str, str]]:
+            create_calls.append(kwargs)
+            return [{"id": f"task-{kwargs['role']}"}]
+
+        app.notion.create_tasks_batch.side_effect = create_tasks_batch
+
+        created = app._create_meeting_attendance_tasks(
+            {
+                "title": "Weekly Sync",
+                "date_iso": "2026-05-12T10:00:00+02:00",
+                "date_label": "Tuesday 12 May, 10:00",
+                "attendees": ["CEO", "CTO", "CEO"],
+            }
+        )
+
+        self.assertEqual(created, [{"id": "task-CEO"}, {"id": "task-CTO"}])
+        self.assertEqual([call["role"] for call in create_calls], ["CEO", "CTO"])
+        self.assertEqual([call["founder_name"] for call in create_calls], ["Oriol", "Arnau"])
+        self.assertEqual({call["project_id"] for call in create_calls}, {"project-alpha"})
+        self.assertEqual({call["project_name"] for call in create_calls}, {"ALPHA"})
+        self.assertEqual({call["week_code"] for call in create_calls}, {"26-W20"})
+        self.assertEqual({call["quarter_name"] for call in create_calls}, {"Q2 2026"})
+        self.assertEqual({call["month_name"] for call in create_calls}, {"May"})
+        self.assertEqual({call["descriptions"][0] for call in create_calls}, {"Attend Weekly Sync on Tuesday 12 May, 10:00."})
+        self.assertEqual({call["is_current_week"] for call in create_calls}, {True})
 
 
 class TaskCommandTests(unittest.TestCase):

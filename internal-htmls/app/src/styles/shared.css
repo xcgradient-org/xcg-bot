@@ -413,6 +413,9 @@ textarea {
   color: #071307;
   font-weight: 700;
 }
+.confirm-warning {
+  color: var(--danger);
+}
 .loading-dots { display: inline-flex; gap: 3px; align-items: center; }
 .loading-dots span {
   width: 4px;

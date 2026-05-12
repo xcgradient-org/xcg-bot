@@ -185,6 +185,19 @@ def _month_name() -> str:
     return datetime.now(MADRID_TZ).strftime("%b")
 
 
+def _month_name_for_date(date_iso: str) -> str:
+    parsed = datetime.fromisoformat(_normalize_date_iso(date_iso))
+    return parsed.strftime("%b")
+
+
+def _week_context_for_date(date_iso: str) -> tuple[int, int, str, str]:
+    parsed = datetime.fromisoformat(_normalize_date_iso(date_iso))
+    iso_year, iso_week, _ = parsed.isocalendar()
+    quarter = min(((iso_week - 1) // 13) + 1, 4)
+    week_code = f"{iso_year % 100:02d}-W{iso_week:02d}"
+    return iso_year, iso_week, week_code, f"Q{quarter} {iso_year}"
+
+
 def _normalize_attendees(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -418,12 +431,25 @@ def _resolve_founder(payload: dict[str, Any]) -> dict[str, str]:
     return founder
 
 
+def _founder_for_attendee(attendee: str) -> dict[str, str] | None:
+    normalized = str(attendee or "").strip()
+    if not normalized:
+        return None
+    role = normalized.upper()
+    for founder in FOUNDER_BY_ID.values():
+        if role == founder["role"] or normalized.lower() == founder["name"].lower():
+            return dict(founder)
+    return None
+
+
 class InternalNotionApp:
     def __init__(self) -> None:
         load_dotenv(ROOT / ".env")
         self.objectives_db_id = _env("NOTION_OBJECTIVES_DB_ID", "NOTION_OBJECTIVES_DB", default=DEFAULT_OBJECTIVES_DB_ID)
         self.krs_db_id = _env("NOTION_KRS_DB_ID", "NOTION_KRS_DB", default=DEFAULT_KRS_DB_ID)
         self.meetings_db_id = _env("NOTION_MEETINGS_DB_ID", "NOTION_MEETINGS_DB", default=DEFAULT_MEETINGS_DB_ID)
+        self.meeting_task_project_id = _env("NOTION_MEETING_TASK_PROJECT_ID")
+        self.meeting_task_project_name = _env("NOTION_MEETING_TASK_PROJECT_NAME", default="ALPHA")
         self.discord_token = _env("DISCORD_TOKEN")
         self.discord_announcements_channel_id = _env("DISCORD_ANNOUNCEMENTS_CHANNEL_ID")
         self.discord_blockers_channel_id = _env("DISCORD_BLOCKERS_CHANNEL_ID")
@@ -852,6 +878,13 @@ class InternalNotionApp:
             },
         )
         page = self._create_meeting_page(meeting, announced=False)
+        attendance_pages: list[dict[str, Any]] = []
+        attendance_task_error = ""
+        try:
+            attendance_pages = self._create_meeting_attendance_tasks(meeting)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Meeting attendance task creation failed: %s", exc)
+            attendance_task_error = str(exc)
         announced = False
         announcement_error = ""
         try:
@@ -866,7 +899,66 @@ class InternalNotionApp:
             "page_id": page.get("id"),
             "announced": announced,
             "announcement_error": announcement_error,
+            "attendance_tasks_created": len(attendance_pages),
+            "attendance_task_page_ids": [task.get("id") for task in attendance_pages],
+            "attendance_task_error": attendance_task_error,
         }
+
+    def _create_meeting_attendance_tasks(self, meeting: dict[str, Any]) -> list[dict[str, Any]]:
+        project = self._meeting_task_project()
+        year, _week, week_code, quarter_name = _week_context_for_date(meeting["date_iso"])
+        month_name = _month_name_for_date(meeting["date_iso"])
+        today_iso = datetime.now(MADRID_TZ).date().isoformat()
+        description = _finalize_sentence(f"Attend {meeting['title']} on {meeting['date_label']}")
+        is_current_week = False
+        try:
+            is_current_week = self.notion._week_matches(week_code, self.notion.get_current_week_from_settings())
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Could not resolve current week for meeting attendance tasks; leaving false: %s", exc)
+
+        created_pages: list[dict[str, Any]] = []
+        seen_roles: set[str] = set()
+        for attendee in meeting.get("attendees", []):
+            founder = _founder_for_attendee(str(attendee))
+            if not founder:
+                LOGGER.warning("Skipping attendance task for unknown attendee %r.", attendee)
+                continue
+            if founder["role"] in seen_roles:
+                continue
+            seen_roles.add(founder["role"])
+            created_pages.extend(
+                self.notion.create_tasks_batch(
+                    project_id=project["id"],
+                    project_name=project["name"],
+                    role=founder["role"],
+                    founder_name=founder["name"],
+                    descriptions=[description],
+                    year=year,
+                    quarter_name=quarter_name,
+                    month_name=month_name,
+                    week_code=week_code,
+                    today_iso=today_iso,
+                    is_current_week=is_current_week,
+                )
+            )
+        return created_pages
+
+    def _meeting_task_project(self) -> dict[str, str]:
+        configured_id = str(self.meeting_task_project_id or "").strip()
+        configured_name = str(self.meeting_task_project_name or "").strip() or "ALPHA"
+        if configured_id:
+            return {"id": configured_id, "name": configured_name}
+
+        projects = self.notion.list_projects()
+        for project in projects:
+            name = str(project.get("name") or "").strip()
+            if name.lower() == configured_name.lower():
+                return {"id": str(project["id"]), "name": name}
+
+        raise RuntimeError(
+            f"Could not find project {configured_name!r} for meeting attendance tasks. "
+            "Set NOTION_MEETING_TASK_PROJECT_ID or NOTION_MEETING_TASK_PROJECT_NAME."
+        )
 
     def _create_meeting_page(self, meeting: dict[str, Any], *, announced: bool) -> dict[str, Any]:
         schema = self.notion._retrieve_schema(self.meetings_db_id)
