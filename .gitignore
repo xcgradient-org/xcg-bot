@@ -1,7 +1,15 @@
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
 .env
 venv/
+.week_state
+.codex
+.agents/
+.claude/settings.local.json
+.internal-server.pid
+internal-server.log
 bot.log
 graphify-out/cache/
 graph-builder/__pycache__/

@@ -8,7 +8,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
-from streaks import MADRID_TZ, sync_founder_streak_from_daily_logs
+from backend.services.streaks import MADRID_TZ, sync_founder_streak_from_daily_logs
 
 
 LOGGER = logging.getLogger("xcg_bot.log_command")

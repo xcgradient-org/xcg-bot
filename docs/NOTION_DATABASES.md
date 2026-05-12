@@ -1,7 +1,7 @@
 # Notion Database Reference
 
-This document describes every Notion database accessible to the XCG OS Automator integration.
-It is the authoritative schema reference for all agents working on this bot.
+This document describes every Notion database accessible to the XC Gradient internal tooling integration.
+It is the authoritative schema reference for all agents working on this repository.
 
 **Last verified:** 2026-05-08
 
@@ -135,7 +135,7 @@ One entry per founder per day. Created by the `/log` Discord command.
 
 **ID:** `e654a7418d7e410c8072db8f7706ca3d`
 
-Scheduled meetings. The background poller in `meetings.py` reads `Announced` and `Reminded`
+Scheduled meetings. The background poller in `bot/commands/meetings.py` reads `Announced` and `Reminded`
 to decide when to post to Discord.
 
 | Property | Type | Notes |

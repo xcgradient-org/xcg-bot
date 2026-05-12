@@ -9,7 +9,8 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.api.routes import build_api_router
 from backend.config import ROOT, configure_logging, load_settings
-from backend.services.internal_tools import InternalToolsService, frontend_dist_root, legacy_redirects
+from backend.services.container import build_services
+from backend.web import frontend_dist_root, legacy_redirects
 
 
 LOGGER = logging.getLogger("xcg_internal.app")
@@ -17,10 +18,11 @@ LOGGER = logging.getLogger("xcg_internal.app")
 
 def create_app() -> FastAPI:
     settings = load_settings()
-    service = InternalToolsService()
+    services = build_services()
     app = FastAPI(title="XC Gradient Internal", version="1.0.0")
     app.state.settings = settings
-    app.state.service = service
+    app.state.services = services
+    app.state.runtime = services.runtime
 
     app.add_middleware(
         CORSMiddleware,
@@ -28,7 +30,7 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
     )
-    app.include_router(build_api_router(service))
+    app.include_router(build_api_router(services))
 
     @app.get("/health")
     def health() -> dict[str, str]:

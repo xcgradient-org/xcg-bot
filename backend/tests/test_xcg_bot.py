@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-import importlib.util
+from datetime import date
 from pathlib import Path
 import datetime as dt
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -13,22 +13,11 @@ BOT_DIR = Path(__file__).resolve().parents[1]
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
-import log_command
-import main
-import meeting_command
-import meetings
-import notion
-import reflection
-import streaks
-import task_command
-
-INTERNAL_SERVER_SPEC = importlib.util.spec_from_file_location(
-    "internal_htmls_server",
-    BOT_DIR / "internal-htmls" / "server.py",
-)
-internal_server = importlib.util.module_from_spec(INTERNAL_SERVER_SPEC)
-assert INTERNAL_SERVER_SPEC.loader is not None
-INTERNAL_SERVER_SPEC.loader.exec_module(internal_server)
+from backend import config as main
+from backend.integrations import notion, reflection
+from backend.services import internal_tools as internal_server
+from backend.services import streaks
+from bot.commands import log_command, meeting_command, meetings, task_command
 
 
 class LoadSettingsTests(unittest.TestCase):
@@ -40,7 +29,7 @@ class LoadSettingsTests(unittest.TestCase):
             root_env.write_text("DISCORD_TOKEN=test\n", encoding="utf-8")
 
             with patch.object(main, "ENV_PATHS", (bot_env, root_env)):
-                with patch("main.load_dotenv") as load_dotenv:
+                with patch("backend.config.load_dotenv") as load_dotenv:
                     env_path = main.load_environment()
 
         self.assertEqual(env_path, bot_env)
@@ -53,13 +42,13 @@ class LoadSettingsTests(unittest.TestCase):
             root_env.write_text("DISCORD_TOKEN=test\n", encoding="utf-8")
 
             with patch.object(main, "ENV_PATHS", (missing_bot_env, root_env)):
-                with patch("main.load_dotenv") as load_dotenv:
+                with patch("backend.config.load_dotenv") as load_dotenv:
                     env_path = main.load_environment()
 
         self.assertEqual(env_path, root_env)
         load_dotenv.assert_called_once_with(root_env)
 
-    @patch("main.load_environment")
+    @patch("backend.config.load_environment")
     def test_load_settings_uses_legacy_notion_env_names(self, load_environment: MagicMock) -> None:
         load_environment.return_value = Path("/tmp/fake.env")
         env = {
@@ -77,7 +66,7 @@ class LoadSettingsTests(unittest.TestCase):
             "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
         }
         with patch.dict("os.environ", env, clear=True):
-            with patch("main.default_llm_settings", return_value=("https://api.groq.com/openai/v1", "openai/gpt-oss-20b", ("key-1", "key-2"), "openai")):
+            with patch("backend.config.default_llm_settings", return_value=("https://api.groq.com/openai/v1", "openai/gpt-oss-20b", ("key-1", "key-2"), "openai")):
                 settings = main.load_settings()
 
         self.assertEqual(settings.notion_tasks_db_id, "tasks-db")
@@ -96,7 +85,7 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.llm_api_keys, ("key-1", "key-2"))
         self.assertEqual(settings.llm_api_style, "openai")
 
-    @patch("main.load_environment")
+    @patch("backend.config.load_environment")
     def test_load_settings_allows_missing_settings_db_id(self, load_environment: MagicMock) -> None:
         load_environment.return_value = Path("/tmp/fake.env")
         env = {
@@ -113,7 +102,7 @@ class LoadSettingsTests(unittest.TestCase):
             "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
         }
         with patch.dict("os.environ", env, clear=True):
-            with patch("main.default_llm_settings", return_value=("https://api.groq.com/openai/v1", "openai/gpt-oss-20b", (), "openai")):
+            with patch("backend.config.default_llm_settings", return_value=("https://api.groq.com/openai/v1", "openai/gpt-oss-20b", (), "openai")):
                 settings = main.load_settings()
 
         self.assertIsNone(settings.notion_settings_db_id)
@@ -253,17 +242,17 @@ class ReflectionServiceTests(unittest.TestCase):
 
 class StreakTests(unittest.TestCase):
     def test_compute_updated_streak_increments_from_yesterday(self) -> None:
-        current, best = streaks.compute_updated_streak("2026-04-09", 3, 4, streaks.date(2026, 4, 10))
+        current, best = streaks.compute_updated_streak("2026-04-09", 3, 4, date(2026, 4, 10))
         self.assertEqual(current, 4)
         self.assertEqual(best, 4)
 
     def test_compute_updated_streak_resets_after_gap(self) -> None:
-        current, best = streaks.compute_updated_streak("2026-04-01", 8, 10, streaks.date(2026, 4, 10))
+        current, best = streaks.compute_updated_streak("2026-04-01", 8, 10, date(2026, 4, 10))
         self.assertEqual(current, 1)
         self.assertEqual(best, 10)
 
     def test_should_reset_streak_only_if_last_log_before_yesterday(self) -> None:
-        today = streaks.date(2026, 4, 10)
+        today = date(2026, 4, 10)
         self.assertFalse(streaks.should_reset_streak("2026-04-09", today))
         self.assertFalse(streaks.should_reset_streak("2026-04-10", today))
         self.assertTrue(streaks.should_reset_streak("2026-04-08", today))
@@ -271,12 +260,12 @@ class StreakTests(unittest.TestCase):
     def test_compute_streak_from_log_dates_uses_daily_logs_as_source(self) -> None:
         current, best, last_log = streaks.compute_streak_from_log_dates(
             [
-                streaks.date(2026, 4, 25),
-                streaks.date(2026, 4, 27),
-                streaks.date(2026, 4, 28),
-                streaks.date(2026, 4, 29),
+                date(2026, 4, 25),
+                date(2026, 4, 27),
+                date(2026, 4, 28),
+                date(2026, 4, 29),
             ],
-            streaks.date(2026, 4, 30),
+            date(2026, 4, 30),
             previous_best=2,
         )
 
@@ -286,8 +275,8 @@ class StreakTests(unittest.TestCase):
 
     def test_compute_streak_from_log_dates_resets_current_after_gap(self) -> None:
         current, best, last_log = streaks.compute_streak_from_log_dates(
-            [streaks.date(2026, 4, 24), streaks.date(2026, 4, 25)],
-            streaks.date(2026, 4, 30),
+            [date(2026, 4, 24), date(2026, 4, 25)],
+            date(2026, 4, 30),
             previous_best=4,
         )
 
@@ -378,7 +367,7 @@ class LogCommandAsyncTests(unittest.IsolatedAsyncioTestCase):
         interaction.followup.send = AsyncMock()
         interaction.channel = None
 
-        with patch("log_command.asyncio.to_thread", new=AsyncMock(return_value=(3, []))) as to_thread:
+        with patch("bot.commands.log_command.asyncio.to_thread", new=AsyncMock(return_value=(3, []))) as to_thread:
             await log_command._finalize_log(
                 interaction,
                 state,
@@ -401,7 +390,7 @@ class LogCommandAsyncTests(unittest.IsolatedAsyncioTestCase):
         interaction.channel = MagicMock()
         interaction.channel.send = AsyncMock()
 
-        with patch("log_command.asyncio.to_thread", new=AsyncMock(return_value=(None, None))):
+        with patch("bot.commands.log_command.asyncio.to_thread", new=AsyncMock(return_value=(None, None))):
             await log_command._finalize_log(
                 interaction,
                 state,
@@ -880,7 +869,7 @@ class MeetingsFormattingTests(unittest.TestCase):
 class MeetingsPollerTests(unittest.IsolatedAsyncioTestCase):
     async def test_query_all_async_uses_to_thread(self) -> None:
         notion_service = MagicMock()
-        with patch("meetings.asyncio.to_thread", new=AsyncMock(return_value=[{"id": "page-1"}])) as to_thread:
+        with patch("bot.commands.meetings.asyncio.to_thread", new=AsyncMock(return_value=[{"id": "page-1"}])) as to_thread:
             result = await meetings._query_all_async(notion_service, "meetings-db")
 
         self.assertEqual(result, [{"id": "page-1"}])
@@ -891,7 +880,7 @@ class MeetingsPollerTests(unittest.IsolatedAsyncioTestCase):
         notion_service.client.pages.update = MagicMock()
         properties = {"Announced": {"checkbox": True}}
 
-        with patch("meetings.asyncio.to_thread", new=AsyncMock(return_value=None)) as to_thread:
+        with patch("bot.commands.meetings.asyncio.to_thread", new=AsyncMock(return_value=None)) as to_thread:
             await meetings._update_page_async(notion_service, "page-1", properties)
 
         to_thread.assert_awaited_once_with(

@@ -1,56 +1,78 @@
-PYTHON ?= $(if $(wildcard ./venv/bin/python),./venv/bin/python,python3)
-GRAPH_PYTHON ?= python3
-GRAPH_BUILDER_DIR := graph-builder
-GRAPH_SCRIPT := $(GRAPH_BUILDER_DIR)/build_code_graph.py
-OPEN_OBSIDIAN_SCRIPT := $(GRAPH_BUILDER_DIR)/open_obsidian.py
-SOURCE_ROOT := .
-GRAPH_JSON := graphify-out/graph.json
-GRAPH_HTML := graphify-out/graph.html
-GRAPH_REPORT := graphify-out/GRAPH_REPORT.md
-GRAPH_WIKI_INDEX := graphify-out/wiki/index.md
-OBSIDIAN_VAULT := $(HOME)/vault/graphify/xcg-bot
+PYTHON ?= $(if $(wildcard ./.venv/bin/python),./.venv/bin/python,python3)
+HOST ?= 100.72.248.102
+PORT ?= 8013
+PID_FILE ?= .internal-server.pid
+LOG_FILE ?= internal-server.log
 
-.PHONY: help run web bot build-frontend test graph graph-build graph-no-obsidian validate-graph clean-graph show-graph-paths
+.PHONY: help run web online stop status bot build-frontend test
 
 help:
 	@printf "Targets:\n"
-	@printf "  make web   - build frontend and start the internal website\n"
+	@printf "  make web   - alias for make online\n"
+	@printf "  make online - build frontend and start the internal website\n"
+	@printf "  make stop  - stop the internal website\n"
+	@printf "  make status - show what is listening on the internal port\n"
 	@printf "  make bot   - start the Discord bot adapter\n"
 	@printf "  make run   - alias for make bot\n"
 	@printf "  make build-frontend - build the React frontend\n"
 	@printf "  make test  - run unit tests\n"
-	@printf "  make graph - rebuild the code graph and open the Obsidian vault\n"
 
 run:
-	$(PYTHON) main.py
+	$(PYTHON) -m bot.main
 
 bot:
-	$(PYTHON) main.py
-
-web:
-	$(MAKE) -C internal-htmls online
+	$(PYTHON) -m bot.main
 
 build-frontend:
 	cd frontend && npm install
 	cd frontend && npm run build
 
 test:
-	$(PYTHON) -m unittest -q tests.test_xcg_bot
+	$(PYTHON) -m unittest -q backend.tests.test_xcg_bot
 
-graph: graph-build
-	$(GRAPH_PYTHON) $(OPEN_OBSIDIAN_SCRIPT) "$(OBSIDIAN_VAULT)"
+web: online
 
-graph-build:
-	$(GRAPH_PYTHON) $(GRAPH_SCRIPT) --source-root "$(SOURCE_ROOT)"
+stop:
+	@if [ -f "$(PID_FILE)" ]; then \
+		pid=$$(cat "$(PID_FILE)"); \
+		if kill -0 "$$pid" 2>/dev/null; then \
+			echo "Stopping previous internal server $$pid"; \
+			kill "$$pid"; \
+			sleep 1; \
+		fi; \
+		rm -f "$(PID_FILE)"; \
+	fi
+	@if command -v fuser >/dev/null 2>&1; then \
+		if fuser -n tcp "$(PORT)" >/dev/null 2>&1; then \
+			echo "Stopping process(es) on port $(PORT)"; \
+			fuser -k -n tcp "$(PORT)" >/dev/null 2>&1 || true; \
+			sleep 1; \
+		fi; \
+	else \
+		pids=$$(ss -ltnp 2>/dev/null | awk -v port=":$(PORT)" '$$4 ~ port "$$" && $$0 ~ /python/ { if (match($$0, /pid=[0-9]+/)) print substr($$0, RSTART+4, RLENGTH-4) }' | sort -u); \
+		if [ -n "$$pids" ]; then \
+			echo "Stopping process(es) on port $(PORT): $$pids"; \
+			kill $$pids; \
+			sleep 1; \
+		fi; \
+	fi
 
-graph-no-obsidian:
-	$(GRAPH_PYTHON) $(GRAPH_SCRIPT) --source-root "$(SOURCE_ROOT)" --skip-obsidian
+online: build-frontend stop
+	@echo "Starting internal tools at http://$(HOST):$(PORT)/"
+	@setsid env INTERNAL_HTMLS_HOST="$(HOST)" INTERNAL_HTMLS_PORT="$(PORT)" "$(PYTHON)" -m backend.app > "$(LOG_FILE)" 2>&1 & echo $$! > "$(PID_FILE)"
+	@sleep 1
+	@if ! kill -0 "$$(cat "$(PID_FILE)")" 2>/dev/null; then \
+		echo "Server failed to start. Last log lines:"; \
+		tail -40 "$(LOG_FILE)"; \
+		exit 1; \
+	fi
+	@echo "PID $$(cat "$(PID_FILE)")"
+	@echo "Log: $(LOG_FILE)"
+	@echo "Home:            http://$(HOST):$(PORT)/"
+	@echo "Task Creator:    http://$(HOST):$(PORT)/task-creator"
+	@echo "OKR Creator:     http://$(HOST):$(PORT)/okr-creator"
+	@echo "Meeting Creator: http://$(HOST):$(PORT)/meeting-creator"
+	@echo "Log Creator:     http://$(HOST):$(PORT)/log-creator"
 
-validate-graph:
-	$(GRAPH_PYTHON) $(GRAPH_SCRIPT) --source-root "$(SOURCE_ROOT)" --validate-only
-
-clean-graph:
-	rm -rf graphify-out
-
-show-graph-paths:
-	@printf '%s\n' "$(GRAPH_JSON)" "$(GRAPH_HTML)" "$(GRAPH_REPORT)" "$(GRAPH_WIKI_INDEX)"
+status:
+	@ss -ltnp | grep ":$(PORT)" || true

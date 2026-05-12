@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Any
 
 from backend.domain.founders import resolve_founder
+from backend.services.streaks import sync_founder_streak_from_daily_logs
 from bot.commands.log_command import build_blocker_message, current_context, rewrite_blocker_message
-from streaks import sync_founder_streak_from_daily_logs
 
 
 class LogsService:

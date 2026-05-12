@@ -11,8 +11,8 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 
 from backend.domain.founders import ROLE_TO_ENV
-from notion import NotionService
-from reflection import ReflectionService
+from backend.integrations.notion import NotionService
+from backend.integrations.reflection import ReflectionService
 
 
 LOGGER = logging.getLogger("xcg_internal.backend")

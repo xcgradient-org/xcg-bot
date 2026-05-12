@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -46,9 +45,8 @@ from backend.services.runtime import (
 )
 from backend.services.tasks import TasksService
 from backend.services.week import WeekService
+from backend.web import frontend_dist_root, legacy_redirects
 
-
-ROOT = Path(__file__).resolve().parents[2]
 
 _env = env
 
@@ -248,25 +246,6 @@ class InternalNotionApp:
 
 
 InternalToolsService = InternalNotionApp
-
-
-def frontend_dist_root() -> Path:
-    return ROOT / "frontend" / "dist"
-
-
-def legacy_redirects() -> dict[str, str]:
-    return {
-        "/task creator": "/task-creator",
-        "/task creator/": "/task-creator",
-        "/okr creator": "/okr-creator",
-        "/okr creator/": "/okr-creator",
-        "/meeting creator": "/meeting-creator",
-        "/meeting creator/": "/meeting-creator",
-        "/log creator": "/log-creator",
-        "/log creator/": "/log-creator",
-        "/weekly rollover": "/",
-        "/weekly rollover/": "/",
-    }
 
 
 __all__ = [

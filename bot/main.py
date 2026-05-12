@@ -6,14 +6,14 @@ import discord
 from discord.ext import commands
 
 from backend.config import Settings, configure_logging, load_environment, load_settings, default_llm_settings
+from backend.integrations.notion import NotionService
+from backend.integrations.reflection import ReflectionService
+from backend.services.streaks import start_daily_reset_task
 from bot.commands.blocker_command import register_blocker_command
 from bot.commands.log_command import register_log_command
 from bot.commands.meeting_command import register_meeting_command
 from bot.commands.meetings import start_meeting_reminder_poller, start_new_meeting_poller
-from notion import NotionService
-from reflection import ReflectionService
 from bot.commands.rollover_command import register_rollover_command
-from streaks import start_daily_reset_task
 from bot.commands.task_command import register_task_command
 
 
