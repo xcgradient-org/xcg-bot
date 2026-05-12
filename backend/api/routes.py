@@ -8,6 +8,7 @@ from backend.api.models import (
     CreateMeetingRequest,
     CreateOKRRequest,
     CreateTasksRequest,
+    LogNowRequest,
     ParseKeyResultsRequest,
     ParseMeetingRequest,
     ParseTasksRequest,
@@ -41,6 +42,14 @@ def build_api_router(services) -> APIRouter:
     @router.get("/current-week")
     def current_week_status() -> dict[str, Any]:
         return _service_call(services.week.current_week_status)
+
+    @router.get("/logging/status")
+    def logging_status() -> dict[str, Any]:
+        return _service_call(services.logs.logging_status)
+
+    @router.post("/logging/log-now")
+    def log_now(payload: LogNowRequest) -> dict[str, Any]:
+        return _service_call(lambda: services.logs.log_now(payload.model_dump()))
 
     @router.post("/parse")
     @router.post("/tasks/parse")

@@ -211,15 +211,23 @@ class NotionService:
             raise RuntimeError(f"Failed to create daily log in Notion: {exc}") from exc
 
     def has_daily_log(self, founder_name: str, today_iso: str) -> bool:
+        return self.find_daily_log(founder_name, today_iso) is not None
+
+    def find_daily_log(self, founder_name: str, today_iso: str) -> dict[str, Any] | None:
         try:
             rows = self._query_all(self.daily_logs_db_id)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to query daily logs: {exc}") from exc
-        return any(
-            self._daily_log_founder_value(row) == founder_name
-            and self._date_matches_day(row, "Date", today_iso)
+        matches = [
+            row
             for row in rows
-        )
+            if self._daily_log_founder_value(row) == founder_name
+            and self._date_matches_day(row, "Date", today_iso)
+        ]
+        if not matches:
+            return None
+        matches.sort(key=lambda row: str(row.get("created_time") or ""), reverse=True)
+        return matches[0]
 
     def daily_log_dates(self, founder_name: str) -> list[date]:
         try:

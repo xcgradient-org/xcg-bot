@@ -72,6 +72,73 @@ function WeekSwitcher() {
   );
 }
 
+function DailyLogPanel() {
+  const [status, setStatus] = useState(null);
+  const [loadingFounder, setLoadingFounder] = useState("");
+  const [message, setMessage] = useState("");
+
+  async function loadStatus() {
+    try {
+      const next = await apiJson("/api/logging/status", { timeoutMs: 12000 });
+      setStatus(next);
+    } catch (exc) {
+      setMessage(exc.message || "Log status unavailable");
+    }
+  }
+
+  async function logNow(founder) {
+    if (loadingFounder) return;
+    setLoadingFounder(founder);
+    setMessage("");
+    try {
+      const result = await postJson("/api/logging/log-now", { founder }, { timeoutMs: 20000 });
+      await loadStatus();
+      if (result.created) {
+        setMessage(`${result.founder.name} logged at ${result.logged_at || "--:--"}`);
+      } else if (result.reason === "already_logged") {
+        setMessage(`${result.founder.name} already logged at ${result.logged_at || "--:--"}`);
+      } else if (result.reason === "no_completed_tasks") {
+        setMessage(`${result.founder.name} has no completed tasks yet`);
+      } else {
+        setMessage("Log unavailable");
+      }
+    } catch (exc) {
+      setMessage(exc.message || "Log failed");
+    } finally {
+      setLoadingFounder("");
+    }
+  }
+
+  useEffect(() => {
+    loadStatus();
+  }, []);
+
+  return (
+    <div className="daily-log-panel">
+      <div className="daily-log-head">
+        <span>Log day</span>
+        <b>{status?.today_iso || "--"}</b>
+      </div>
+      <div className="daily-log-founders">
+        {(status?.founders || []).map((founder) => (
+          <button
+            className={`daily-log-btn ${founder.logged ? "is-logged" : ""}`}
+            key={founder.founder}
+            type="button"
+            disabled={Boolean(loadingFounder) || founder.logged}
+            onClick={() => logNow(founder.founder)}
+            title={founder.logged ? `${founder.founder_name} logged at ${founder.logged_at}` : `Log ${founder.founder_name}`}
+          >
+            <span>{founder.role}</span>
+            <b>{founder.logged ? `Logged ${founder.logged_at || ""}` : loadingFounder === founder.founder ? "Logging..." : "Log now"}</b>
+          </button>
+        ))}
+      </div>
+      {message ? <span className="week-message">{message}</span> : null}
+    </div>
+  );
+}
+
 export default function Home() {
   document.title = "XC Gradient — Internal";
   return (
@@ -91,6 +158,7 @@ export default function Home() {
           </nav>
           <div className="internal-status">
             <WeekSwitcher />
+            <DailyLogPanel />
           </div>
         </div>
       </header>

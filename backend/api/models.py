@@ -57,5 +57,10 @@ class ParseMeetingRequest(FounderPayload):
 class CreateMeetingRequest(FounderPayload):
     meeting: dict[str, Any]
 
+
+class LogNowRequest(FounderPayload):
+    pass
+
+
 class WeekRolloverRequest(BaseModel):
     current_week: str | None = None

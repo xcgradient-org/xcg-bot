@@ -17,6 +17,7 @@ from backend import config as main
 from backend.integrations import notion, reflection
 from backend.services import internal_tools as internal_server
 from backend.services import streaks
+from backend.services.logs import LogsService
 from bot.commands import log_command, meeting_command, meetings, task_command
 
 
@@ -300,7 +301,7 @@ class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
         notion_service.get_all_streak_rows.return_value = [row]
         notion_service.founder_name.return_value = "Oriol"
         notion_service._property_text.return_value = "CEO"
-        notion_service.has_daily_log.return_value = False
+        notion_service.find_daily_log.return_value = None
         notion_service.query_log_tasks.return_value = (
             [{"id": "task-1"}],
             [{"id": "task-1"}],
@@ -324,6 +325,87 @@ class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(results[0]["created"])
         self.assertEqual(results[0]["today_iso"], "2026-05-12")
+
+
+class WebLoggingTests(unittest.TestCase):
+    def test_logging_status_reports_logged_times(self) -> None:
+        notion_service = MagicMock()
+        reflection_service = MagicMock()
+        runtime = MagicMock()
+        runtime.notion = notion_service
+        runtime.reflection = reflection_service
+        service = LogsService(runtime)
+
+        notion_service.find_daily_log.side_effect = [
+            {"created_time": "2026-05-12T19:03:00.000Z"},
+            None,
+            None,
+        ]
+
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+            payload = service.logging_status()
+
+        self.assertEqual(payload["today_iso"], "2026-05-12")
+        self.assertEqual(payload["founders"][0]["founder"], "oriol")
+        self.assertTrue(payload["founders"][0]["logged"])
+        self.assertEqual(payload["founders"][0]["logged_at"], "21:03")
+        self.assertFalse(payload["founders"][1]["logged"])
+
+    def test_log_now_creates_manual_log_for_current_context(self) -> None:
+        notion_service = MagicMock()
+        reflection_service = MagicMock()
+        runtime = MagicMock()
+        runtime.notion = notion_service
+        runtime.reflection = reflection_service
+        service = LogsService(runtime)
+
+        notion_service.find_daily_log.side_effect = [
+            None,
+            {"created_time": "2026-05-12T19:03:00.000Z"},
+        ]
+        notion_service.query_log_tasks.return_value = (
+            [{"id": "task-1"}],
+            [{"id": "task-1"}],
+            "26-W20",
+        )
+        notion_service.task_descriptions.return_value = ["Close enterprise deal."]
+        notion_service.page_ids.return_value = ["task-1"]
+        notion_service.streaks_available.return_value = False
+        reflection_service.generate_reflection.return_value = "Manual log"
+
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+            payload = service.log_now({"founder": "oriol"})
+
+        notion_service.create_daily_log.assert_called_once_with(
+            founder_name="Oriol",
+            founder_role="CEO",
+            week_code="26-W20",
+            today_iso="2026-05-12",
+            completed_task_ids=["task-1"],
+            notes_text="Manual log",
+        )
+        self.assertTrue(payload["created"])
+        self.assertTrue(payload["logged"])
+        self.assertEqual(payload["logged_at"], "21:03")
+
+    def test_log_now_reports_missing_completed_tasks(self) -> None:
+        notion_service = MagicMock()
+        reflection_service = MagicMock()
+        runtime = MagicMock()
+        runtime.notion = notion_service
+        runtime.reflection = reflection_service
+        service = LogsService(runtime)
+
+        notion_service.find_daily_log.return_value = None
+        notion_service.query_log_tasks.return_value = ([], [], "26-W20")
+
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+            payload = service.log_now({"founder": "oriol"})
+
+        notion_service.create_daily_log.assert_not_called()
+        self.assertFalse(payload["created"])
+        self.assertFalse(payload["logged"])
+        self.assertEqual(payload["reason"], "no_completed_tasks")
 
 
 class LogCommandTests(unittest.TestCase):
@@ -1004,16 +1086,13 @@ class NotionServiceTests(unittest.TestCase):
         # End of year 2026 (W53 is the last week of 2026)
         self.assertEqual(service.get_next_week_code("26-W53"), "27-W01")
 
-    def test_get_current_week_infers_from_tasks_when_settings_db_is_absent(self) -> None:
+    def test_get_current_week_defaults_to_calendar_week_when_settings_db_is_absent(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
-        tasks = [
-            {"properties": {"Week": {"type": "select", "select": {"name": "26-W18"}}, "Status": {"type": "select", "select": {"name": "Done"}}}},
-            {"properties": {"Week": {"type": "select", "select": {"name": "26-W19"}}, "Status": {"type": "select", "select": {"name": "Todo"}}}},
-            {"properties": {"Week": {"type": "select", "select": {"name": "26-W20"}}, "Status": {"type": "select", "select": {"name": "Archived"}}}},
-        ]
+        fake_now = dt.datetime(2026, 5, 12, 9, 0, 0)
 
-        with patch.object(service, "_query_all", return_value=tasks):
-            self.assertEqual(service.get_current_week_from_settings(), "26-W19")
+        with patch("backend.integrations.notion.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value = fake_now
+            self.assertEqual(service.get_current_week_from_settings(), "26-W20")
 
     def test_set_current_week_in_settings_noops_when_settings_db_is_absent(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")

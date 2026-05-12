@@ -4,7 +4,9 @@ from datetime import datetime
 from typing import Any
 
 from backend.domain.founders import resolve_founder
+from backend.domain.founders import FOUNDER_BY_ID
 from bot.commands.log_command import build_blocker_message, current_context, rewrite_blocker_message
+from backend.services.streaks import MADRID_TZ
 
 
 class LogsService:
@@ -41,6 +43,49 @@ class LogsService:
                 for task in candidate_tasks
             ],
             "completed_count": len(completed_tasks),
+        }
+
+    def logging_status(self) -> dict[str, Any]:
+        ctx = current_context()
+        founders: list[dict[str, Any]] = []
+        for founder_id, founder in FOUNDER_BY_ID.items():
+            row = self.runtime.notion.find_daily_log(founder["name"], ctx.today_iso)
+            founders.append(
+                {
+                    "founder": founder_id,
+                    "founder_name": founder["name"],
+                    "role": founder["role"],
+                    "logged": row is not None,
+                    "logged_at": self._row_logged_at(row),
+                }
+            )
+        return {
+            "today_iso": ctx.today_iso,
+            "week_code": ctx.week_code,
+            "founders": founders,
+        }
+
+    def log_now(self, payload: dict[str, Any]) -> dict[str, Any]:
+        founder = resolve_founder(payload)
+        ctx = current_context()
+        result = self.auto_create_log_for_founder(
+            founder_name=founder["name"],
+            founder_role=founder["role"],
+            today_iso=ctx.today_iso,
+            week_code=ctx.week_code,
+            raw_notes="Manual end-of-day log from the internal site.",
+        )
+        row = self.runtime.notion.find_daily_log(founder["name"], ctx.today_iso)
+        return {
+            "founder": founder,
+            "today_iso": ctx.today_iso,
+            "week_code": result.get("week_code") or ctx.week_code,
+            "logged": row is not None,
+            "logged_at": self._row_logged_at(row),
+            "created": bool(result.get("created")),
+            "reason": result.get("reason"),
+            "completed_count": result.get("completed_count", 0),
+            "streak": result.get("streak"),
         }
 
     def create_log(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -147,9 +192,17 @@ class LogsService:
         founder_role: str,
         today_iso: str,
         week_code: str,
+        raw_notes: str = "Automatic log created from completed tasks.",
     ) -> dict[str, Any]:
-        if self.runtime.notion.has_daily_log(founder_name, today_iso):
-            return {"created": False, "reason": "already_logged", "today_iso": today_iso, "week_code": week_code}
+        existing_row = self.runtime.notion.find_daily_log(founder_name, today_iso)
+        if existing_row is not None:
+            return {
+                "created": False,
+                "reason": "already_logged",
+                "today_iso": today_iso,
+                "week_code": week_code,
+                "logged_at": self._row_logged_at(existing_row),
+            }
 
         _candidate_tasks, completed_tasks, active_week = self.runtime.notion.query_log_tasks(
             founder_role,
@@ -158,10 +211,14 @@ class LogsService:
             founder_name,
         )
         if not completed_tasks:
-            return {"created": False, "reason": "no_completed_tasks", "today_iso": today_iso, "week_code": active_week or week_code}
+            return {
+                "created": False,
+                "reason": "no_completed_tasks",
+                "today_iso": today_iso,
+                "week_code": active_week or week_code,
+            }
 
         task_descriptions = self.runtime.notion.task_descriptions(completed_tasks)
-        raw_notes = "Automatic log created from completed tasks."
         try:
             reflection_text = self.runtime.reflection.generate_reflection(
                 founder_name=founder_name,
@@ -197,6 +254,19 @@ class LogsService:
             "completed_count": len(completed_tasks),
             "streak": streak,
         }
+
+    def _row_logged_at(self, row: dict[str, Any] | None) -> str | None:
+        if not row:
+            return None
+        created_time = str(row.get("created_time") or "").strip()
+        if not created_time:
+            return None
+        normalized = created_time.replace("Z", "+00:00")
+        try:
+            timestamp = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
+        return timestamp.astimezone(MADRID_TZ).strftime("%H:%M")
 
     def _sync_streak(self, founder_name: str, today_iso: str) -> int | None:
         if not self.runtime.notion.streaks_available():

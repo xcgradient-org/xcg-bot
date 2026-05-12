@@ -116,7 +116,7 @@ All work items. Scoped by week and owner. Each task belongs to one Project and o
 
 **ID:** `9c40e6920dd6468190a050035f9a98b7`
 
-One entry per founder per day. Created automatically at the daily 05:00 Europe/Madrid finalization when the founder completed at least one task.
+One entry per founder per day. Created either when the founder clicks the manual end-of-day log button in the internal site, or automatically at the daily 05:00 Europe/Madrid finalization if they completed at least one task and still have no log.
 
 | Property | Type | Notes |
 |----------|------|-------|

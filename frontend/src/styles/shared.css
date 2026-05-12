@@ -465,7 +465,14 @@ textarea {
   border-radius: 999px;
   background: var(--card);
 }
-.internal-status { justify-self: end; }
+.internal-status {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .home-btn {
   display: inline-flex;
   align-items: center;
@@ -553,6 +560,77 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.daily-log-panel {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.daily-log-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink-2);
+  min-height: 32px;
+  border-radius: 999px;
+  padding: 0 11px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.daily-log-head b {
+  font-size: 12px;
+  color: var(--paper);
+  background: var(--ink);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.daily-log-founders {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.daily-log-btn {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink-2);
+  min-height: 32px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 11px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.daily-log-btn b {
+  font-size: 11px;
+  color: var(--ink);
+}
+.daily-log-btn:hover:not(:disabled) {
+  border-color: var(--ink);
+  background: #fff;
+}
+.daily-log-btn.is-logged {
+  background: var(--accent-soft);
+  border-color: color-mix(in oklch, var(--accent-deep) 45%, var(--line));
+}
+.daily-log-btn:disabled {
+  cursor: default;
+  opacity: 1;
+}
 @keyframes weekPulse {
   0%, 100% { transform: translateY(0); opacity: .8; }
   50% { transform: translateY(-1px); opacity: 1; }
@@ -627,6 +705,7 @@ textarea {
   .bar-inner { grid-template-columns: 1fr auto; }
   .stepper, .internal-home-nav { display: none; }
   main { padding: 36px 20px 100px; }
+  .internal-status { justify-self: start; justify-content: flex-start; }
   .founders, .tool-grid { grid-template-columns: 1fr; }
   .phase-head { flex-direction: column; align-items: flex-start; }
   .phase-head .blurb { text-align: left; }
