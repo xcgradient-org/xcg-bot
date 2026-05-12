@@ -23,13 +23,6 @@ const tools = [
     description: "Schedule a meeting, write it to Notion, and announce it in Discord.",
     meta: "Meetings",
   },
-  {
-    href: "/log-creator",
-    eyebrow: "Daily close",
-    title: "Log Creator",
-    description: "Review completed tasks, add notes, post blockers, and save the daily log.",
-    meta: "Logs",
-  },
 ];
 
 function WeekSwitcher() {
@@ -95,7 +88,6 @@ export default function Home() {
             <a href="/task-creator">Tasks</a>
             <a href="/okr-creator">OKRs</a>
             <a href="/meeting-creator">Meetings</a>
-            <a href="/log-creator">Logs</a>
           </nav>
           <div className="internal-status">
             <WeekSwitcher />

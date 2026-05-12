@@ -10,7 +10,6 @@ from backend.integrations.notion import NotionService
 from backend.integrations.reflection import ReflectionService
 from backend.services.streaks import start_daily_reset_task
 from bot.commands.blocker_command import register_blocker_command
-from bot.commands.log_command import register_log_command
 from bot.commands.meeting_command import register_meeting_command
 from bot.commands.meetings import start_meeting_reminder_poller, start_new_meeting_poller
 from bot.commands.rollover_command import register_rollover_command
@@ -32,12 +31,11 @@ class XCGradientOSBot(commands.Bot):
         self.meeting_reminder_task = None
 
     async def setup_hook(self) -> None:
-        register_log_command(self, self.tree, self.notion, self.reflection, self.settings)
         register_blocker_command(self, self.tree, self.reflection, self.settings)
         register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
         register_task_command(self, self.tree, self.notion, self.reflection, self.settings)
         register_rollover_command(self.tree, self.notion, self.settings)
-        LOGGER.info("/meeting, /log, /blocker, /tasks, and /rollover commands registered")
+        LOGGER.info("/meeting, /blocker, /tasks, and /rollover commands registered")
         synced = await self.tree.sync()
         LOGGER.info("Slash commands synced: %s", len(synced))
 
@@ -57,7 +55,7 @@ class XCGradientOSBot(commands.Bot):
             LOGGER.exception("Unable to verify announcements channel %s: %s", self.settings.discord_announcements_channel_id, exc)
 
         if self.notion.streaks_available() and (self.reset_task is None or self.reset_task.done()):
-            self.reset_task = start_daily_reset_task(self, self.notion)
+            self.reset_task = start_daily_reset_task(self, self.notion, self.reflection)
         elif not self.notion.streaks_available():
             LOGGER.info("Streak maintenance is disabled because the configured Streaks database is unavailable.")
         if self.new_meeting_task is None or self.new_meeting_task.done():

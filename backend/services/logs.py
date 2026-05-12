@@ -4,7 +4,6 @@ from datetime import datetime
 from typing import Any
 
 from backend.domain.founders import resolve_founder
-from backend.services.streaks import sync_founder_streak_from_daily_logs
 from bot.commands.log_command import build_blocker_message, current_context, rewrite_blocker_message
 
 
@@ -103,17 +102,7 @@ class LogsService:
             notes_text=reflection_text,
         )
 
-        streak = None
-        if self.runtime.notion.streaks_available():
-            try:
-                streak, _best, _last = sync_founder_streak_from_daily_logs(
-                    self.runtime.notion,
-                    founder["name"],
-                    today=datetime.fromisoformat(ctx.today_iso).date(),
-                )
-            except Exception as exc:  # noqa: BLE001
-                from backend.services.runtime import LOGGER
-                LOGGER.warning("Streak sync failed after web log save for %s: %s", founder["name"], exc)
+        streak = self._sync_streak(founder["name"], ctx.today_iso)
 
         remaining_count = None
         try:
@@ -150,3 +139,78 @@ class LogsService:
             "streak": streak,
             "blocker_posted": blocker_posted,
         }
+
+    def auto_create_log_for_founder(
+        self,
+        *,
+        founder_name: str,
+        founder_role: str,
+        today_iso: str,
+        week_code: str,
+    ) -> dict[str, Any]:
+        if self.runtime.notion.has_daily_log(founder_name, today_iso):
+            return {"created": False, "reason": "already_logged", "today_iso": today_iso, "week_code": week_code}
+
+        _candidate_tasks, completed_tasks, active_week = self.runtime.notion.query_log_tasks(
+            founder_role,
+            today_iso,
+            week_code,
+            founder_name,
+        )
+        if not completed_tasks:
+            return {"created": False, "reason": "no_completed_tasks", "today_iso": today_iso, "week_code": active_week or week_code}
+
+        task_descriptions = self.runtime.notion.task_descriptions(completed_tasks)
+        raw_notes = "Automatic log created from completed tasks."
+        try:
+            reflection_text = self.runtime.reflection.generate_reflection(
+                founder_name=founder_name,
+                founder_role=founder_role,
+                today_iso=today_iso,
+                completed_tasks=task_descriptions,
+                raw_notes=raw_notes,
+            )
+        except Exception as exc:  # noqa: BLE001
+            from backend.services.runtime import LOGGER
+            LOGGER.warning("Auto-log reflection generation failed; using fallback note for %s: %s", founder_name, exc)
+            reflection_text = self.runtime.reflection.build_fallback_reflection(
+                founder_name=founder_name,
+                founder_role=founder_role,
+                today_iso=today_iso,
+                completed_tasks=task_descriptions,
+                raw_notes=raw_notes,
+            )
+
+        self.runtime.notion.create_daily_log(
+            founder_name=founder_name,
+            founder_role=founder_role,
+            week_code=active_week or week_code,
+            today_iso=today_iso,
+            completed_task_ids=self.runtime.notion.page_ids(completed_tasks),
+            notes_text=reflection_text,
+        )
+        streak = self._sync_streak(founder_name, today_iso)
+        return {
+            "created": True,
+            "today_iso": today_iso,
+            "week_code": active_week or week_code,
+            "completed_count": len(completed_tasks),
+            "streak": streak,
+        }
+
+    def _sync_streak(self, founder_name: str, today_iso: str) -> int | None:
+        if not self.runtime.notion.streaks_available():
+            return None
+        try:
+            from backend.services.streaks import sync_founder_streak_from_daily_logs
+
+            streak, _best, _last = sync_founder_streak_from_daily_logs(
+                self.runtime.notion,
+                founder_name,
+                today=datetime.fromisoformat(today_iso).date(),
+            )
+            return streak
+        except Exception as exc:  # noqa: BLE001
+            from backend.services.runtime import LOGGER
+            LOGGER.warning("Streak sync failed after log save for %s: %s", founder_name, exc)
+            return None

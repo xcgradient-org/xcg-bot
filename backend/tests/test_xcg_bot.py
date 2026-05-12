@@ -292,6 +292,40 @@ class StreakTests(unittest.TestCase):
         self.assertTrue(streaks.should_run_startup_reset(after_cutoff))
 
 
+class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_create_missing_daily_logs_creates_log_for_completed_tasks(self) -> None:
+        notion_service = MagicMock()
+        reflection_service = MagicMock()
+        row = {"id": "team-oriol", "properties": {}}
+        notion_service.get_all_streak_rows.return_value = [row]
+        notion_service.founder_name.return_value = "Oriol"
+        notion_service._property_text.return_value = "CEO"
+        notion_service.has_daily_log.return_value = False
+        notion_service.query_log_tasks.return_value = (
+            [{"id": "task-1"}],
+            [{"id": "task-1"}],
+            "26-W20",
+        )
+        notion_service.task_descriptions.return_value = ["Close enterprise deal."]
+        notion_service.page_ids.return_value = ["task-1"]
+        notion_service.streaks_available.return_value = False
+        reflection_service.generate_reflection.return_value = "Auto-generated reflection"
+
+        now = streaks.MADRID_TZ.localize(dt.datetime(2026, 5, 13, 5, 0))
+        results = await streaks.auto_create_missing_daily_logs(notion_service, reflection_service, now=now)
+
+        notion_service.create_daily_log.assert_called_once_with(
+            founder_name="Oriol",
+            founder_role="CEO",
+            week_code="26-W20",
+            today_iso="2026-05-12",
+            completed_task_ids=["task-1"],
+            notes_text="Auto-generated reflection",
+        )
+        self.assertTrue(results[0]["created"])
+        self.assertEqual(results[0]["today_iso"], "2026-05-12")
+
+
 class LogCommandTests(unittest.TestCase):
     def test_rewrite_blocker_message_uses_llm_response(self) -> None:
         state = MagicMock()

@@ -4,10 +4,10 @@ This repo now centers on the internal website for XC Gradient. The Discord bot r
 
 ## Features
 
-- Internal website for tasks, OKRs, meetings, logs, and week rollover
+- Internal website for tasks, OKRs, meetings, and week rollover
 - FastAPI backend with shared Notion and LLM integrations
 - Optional Discord command adapter over the same backend-facing logic
-- Reflection and streak tracking
+- Automatic daily logs, reflection generation, and streak tracking
 
 ## Installation
 

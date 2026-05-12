@@ -57,16 +57,5 @@ class ParseMeetingRequest(FounderPayload):
 class CreateMeetingRequest(FounderPayload):
     meeting: dict[str, Any]
 
-
-class LogPreviewRequest(FounderPayload):
-    pass
-
-
-class CreateLogRequest(FounderPayload):
-    selected_task_ids: list[str] = Field(default_factory=list)
-    notes: str | None = None
-    blocker: dict[str, Any] | None = None
-
-
 class WeekRolloverRequest(BaseModel):
     current_week: str | None = None

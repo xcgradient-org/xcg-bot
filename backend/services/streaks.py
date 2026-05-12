@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Iterable
 
 import pytz
@@ -20,7 +21,7 @@ def compute_updated_streak(last_log_iso: str, current_streak: int, best_streak: 
         last_log_date = date.fromisoformat(last_log_iso)
         yesterday = today - timedelta(days=1)
         if last_log_date == today:
-            # Avoid double-incrementing if /log is run twice on the same day.
+            # Avoid double-incrementing if the same day is finalized more than once.
             new_current = current_streak or 1
         elif last_log_date == yesterday:
             new_current = current_streak + 1
@@ -106,7 +107,40 @@ async def sync_streaks_from_daily_logs(notion) -> None:
             LOGGER.exception("Failed to sync streak for %s from Daily Logs: %s", founder_name or row["id"], exc)
 
 
-async def run_daily_maintenance(notion) -> None:
+async def auto_create_missing_daily_logs(notion, reflection, now: datetime | None = None) -> list[dict[str, object]]:
+    from backend.services.logs import LogsService
+
+    local_now = (now or datetime.now(MADRID_TZ)).astimezone(MADRID_TZ)
+    target_date = local_now.date() - timedelta(days=1)
+    target_iso = target_date.isoformat()
+    iso_year, iso_week, _ = target_date.isocalendar()
+    week_code = f"{iso_year % 100:02d}-W{iso_week:02d}"
+
+    service = LogsService(SimpleNamespace(notion=notion, reflection=reflection))
+    results: list[dict[str, object]] = []
+    for row in notion.get_all_streak_rows():
+        founder_name = notion.founder_name(row)
+        founder_role = notion._property_text(row, "Role")
+        if not founder_name or not founder_role:
+            continue
+        try:
+            result = service.auto_create_log_for_founder(
+                founder_name=founder_name,
+                founder_role=founder_role,
+                today_iso=target_iso,
+                week_code=week_code,
+            )
+            result["founder_name"] = founder_name
+            results.append(result)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Failed to auto-create daily log for %s: %s", founder_name, exc)
+    created = [result for result in results if result.get("created")]
+    LOGGER.info("Automatic log finalization processed %s founders; created %s logs for %s.", len(results), len(created), target_iso)
+    return results
+
+
+async def run_daily_maintenance(notion, reflection) -> None:
+    await auto_create_missing_daily_logs(notion, reflection)
     await sync_streaks_from_daily_logs(notion)
 
 
@@ -123,26 +157,28 @@ def seconds_until_next_reset(now: datetime) -> float:
     return max((next_run - local_now).total_seconds(), 0.0)
 
 
-async def daily_reset_loop(notion) -> None:
-    try:
-        LOGGER.info("Running startup Notion maintenance fallback.")
-        await run_daily_maintenance(notion)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.exception("Startup Notion maintenance failed: %s", exc)
+async def daily_reset_loop(notion, reflection) -> None:
+    current = datetime.now(MADRID_TZ)
+    if should_run_startup_reset(current):
+        try:
+            LOGGER.info("Running startup Notion maintenance fallback.")
+            await run_daily_maintenance(notion, reflection)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.exception("Startup Notion maintenance failed: %s", exc)
 
     while True:
         wait_seconds = seconds_until_next_reset(datetime.now(MADRID_TZ))
         LOGGER.info("Next streak reset scheduled in %.0f seconds.", wait_seconds)
         await asyncio.sleep(wait_seconds)
         try:
-            await run_daily_maintenance(notion)
+            await run_daily_maintenance(notion, reflection)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
             LOGGER.exception("Daily Notion maintenance failed: %s", exc)
 
 
-def start_daily_reset_task(bot, notion):
-    return bot.loop.create_task(daily_reset_loop(notion))
+def start_daily_reset_task(bot, notion, reflection):
+    return bot.loop.create_task(daily_reset_loop(notion, reflection))

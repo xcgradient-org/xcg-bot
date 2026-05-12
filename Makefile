@@ -72,7 +72,6 @@ online: build-frontend stop
 	@echo "Task Creator:    http://$(HOST):$(PORT)/task-creator"
 	@echo "OKR Creator:     http://$(HOST):$(PORT)/okr-creator"
 	@echo "Meeting Creator: http://$(HOST):$(PORT)/meeting-creator"
-	@echo "Log Creator:     http://$(HOST):$(PORT)/log-creator"
 
 status:
 	@ss -ltnp | grep ":$(PORT)" || true

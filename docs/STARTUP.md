@@ -34,6 +34,5 @@ Share these links with cofounders connected to Tailscale:
 - Task Creator: `http://100.72.248.102:8013/task-creator`
 - OKR Creator: `http://100.72.248.102:8013/okr-creator`
 - Meeting Creator: `http://100.72.248.102:8013/meeting-creator`
-- Log Creator: `http://100.72.248.102:8013/log-creator`
 
 For `internal.xcgradient.com`, point your internal DNS or reverse proxy at the local server over Tailscale.

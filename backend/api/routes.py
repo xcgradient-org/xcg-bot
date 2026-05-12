@@ -5,11 +5,9 @@ from typing import Any, Callable
 from fastapi import APIRouter, HTTPException
 
 from backend.api.models import (
-    CreateLogRequest,
     CreateMeetingRequest,
     CreateOKRRequest,
     CreateTasksRequest,
-    LogPreviewRequest,
     ParseKeyResultsRequest,
     ParseMeetingRequest,
     ParseTasksRequest,
@@ -75,16 +73,6 @@ def build_api_router(services) -> APIRouter:
     @router.post("/meetings")
     def create_meeting(payload: CreateMeetingRequest) -> dict[str, Any]:
         return _service_call(lambda: services.meetings.create_meeting(payload.model_dump()))
-
-    @router.post("/log/preview")
-    @router.post("/logs/preview")
-    def log_preview(payload: LogPreviewRequest) -> dict[str, Any]:
-        return _service_call(lambda: services.logs.log_preview(payload.model_dump()))
-
-    @router.post("/log")
-    @router.post("/logs")
-    def create_log(payload: CreateLogRequest) -> dict[str, Any]:
-        return _service_call(lambda: services.logs.create_log(payload.model_dump()))
 
     @router.post("/week/rollover")
     def run_weekly_rollover(payload: WeekRolloverRequest) -> dict[str, Any]:
