@@ -57,16 +57,6 @@ make bot
 
 The website is the primary product surface. New product logic should live behind the backend service layer and be reused by both the web API and any remaining Discord commands.
 
-## Docker & CI/CD
-
-The bot is fully containerized for reliable deployment.
-
-### Run in Docker
-```bash
-docker build -t xcg-bot .
-docker run --rm --env-file .env xcg-bot
-```
-
 ## License
 
 All rights reserved. © 2026 XC Gradient.

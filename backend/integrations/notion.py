@@ -1062,26 +1062,14 @@ class NotionService:
             return ""
         return title.split("·", 1)[0].strip()
 
-    _WEEK_STATE_FILE = Path(__file__).resolve().parent / ".week_state"
-    _WEEK_STATE_DEFAULT = "26-W19"
-
-    def _read_week_state(self) -> str:
-        try:
-            text = self._WEEK_STATE_FILE.read_text().strip()
-            if re.match(r"^\d{2}-W\d{1,2}$", text):
-                return text
-            LOGGER.warning("Malformed .week_state content %r; using default %s", text, self._WEEK_STATE_DEFAULT)
-        except FileNotFoundError:
-            LOGGER.info(".week_state not found; using default %s", self._WEEK_STATE_DEFAULT)
-        return self._WEEK_STATE_DEFAULT
-
-    def _write_week_state(self, week_code: str) -> None:
-        self._WEEK_STATE_FILE.write_text(week_code + "\n")
-        LOGGER.info("Wrote week state: %s → %s", self._WEEK_STATE_FILE, week_code)
+    def _default_current_week(self) -> str:
+        now = datetime.now()
+        iso_year, iso_week, _ = now.isocalendar()
+        return f"{iso_year % 100:02d}-W{iso_week:02d}"
 
     def get_current_week_from_settings(self) -> str:
         if not self.settings_db_id:
-            return self._read_week_state()
+            return self._default_current_week()
         rows = self._query_all(self.settings_db_id)
         if not rows:
             raise RuntimeError("Settings database is empty.")
@@ -1093,10 +1081,7 @@ class NotionService:
 
     def set_current_week_in_settings(self, week_code: str, status: str, count: int) -> None:
         if not self.settings_db_id:
-            if status == "success":
-                self._write_week_state(week_code)
-            else:
-                LOGGER.info("Rollover status=%s; not advancing local week state.", status)
+            LOGGER.info("No settings database configured; skipping persisted current-week update to %s (status=%s, count=%s).", week_code, status, count)
             return
         rows = self._query_all(self.settings_db_id)
         if not rows:
