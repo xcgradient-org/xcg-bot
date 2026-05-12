@@ -1,16 +1,15 @@
-# 🤖 XCGradient Bot (XCG-Bot)
+# XC Gradient Internal
 
-The main operational bot for XC Gradient, managing Discord logging, tasks, and meetings with Notion integration.
+This repo now centers on the internal website for XC Gradient. The Discord bot remains available as a thin adapter while the web app becomes the primary interface.
 
-## 🚀 Features
+## Features
 
-- **Logging:** `/log` logs updates to Notion.
-- **Tasks:** `/tasks add` adds tasks to Notion, with an AI fallback (Gemini CLI) for parsing complex requests.
-- **Meetings:** `/meeting` for real-time syncs and summaries.
-- **Reflection:** Daily/weekly reflection tools.
-- **Streaks:** Tracking operational momentum.
+- Internal website for tasks, OKRs, meetings, logs, and week rollover
+- FastAPI backend with shared Notion and LLM integrations
+- Optional Discord command adapter over the same backend-facing logic
+- Reflection and streak tracking
 
-## 📥 Installation
+## Installation
 
 1. Clone the repo and install dependencies (Python 3.10+):
    ```bash
@@ -29,14 +28,26 @@ The main operational bot for XC Gradient, managing Discord logging, tasks, and m
    LLM_API_KEY_3=...
    ```
 
-## 🛠️ Usage
+## Usage
 
-Run the bot:
+Start the internal website:
 ```bash
-python main.py
+make web
 ```
 
-## 🕸️ Code Graph
+Start the Discord adapter:
+```bash
+make bot
+```
+
+## Repo Shape
+
+- `frontend/`: React app
+- `backend/`: FastAPI app and internal services
+- `bot/`: Discord adapter entrypoint
+- `internal-htmls/`: compatibility launcher and operational helpers
+
+## Code Graph
 
 The repo also includes a local `graphify` workflow that builds a dependency graph for the whole bot codebase and exports it to Obsidian.
 
@@ -67,18 +78,11 @@ make validate-graph
 
 When the code changes, rerun `make graph`. There is no seed file in this repo: the graph is rebuilt directly from the source code each time.
 
-## 📂 Core Modules
+## Development
 
-- `main.py`: Discord client and command registration.
-- `notion.py`: Notion API wrapper and data management.
-- `task_command.py`: Logic for task creation and AI parsing.
-- `meeting_command.py`: Management of operational syncs.
+The website is the primary product surface. New product logic should live behind the backend service layer and be reused by both the web API and any remaining Discord commands.
 
-## 👨‍💻 Development
-
-To add new commands, implement them within the appropriate `*_command.py` module and register the new slash command in `main.py`.
-
-## 🐳 Docker & CI/CD
+## Docker & CI/CD
 
 The bot is fully containerized for reliable deployment.
 
@@ -88,12 +92,6 @@ docker build -t xcg-bot .
 docker run --rm --env-file .env xcg-bot
 ```
 
-### GitHub Actions
-Every push to `main` triggers:
-- **Test:** Runs all Python tests via `pytest`.
-- **Lint:** Checks code quality with `flake8`.
-- **Build & Push:** Automatically pushes the latest image to `ghcr.io/xcgradient-org/xcg-bot:latest`.
-
-## ⚖️ License
+## License
 
 All rights reserved. © 2026 XC Gradient.

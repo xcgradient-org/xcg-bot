@@ -6,8 +6,8 @@ PID_FILE ?= .internal-server.pid
 .PHONY: online build stop status
 
 build:
-	cd app && npm install
-	cd app && npm run build
+	cd ../frontend && npm install
+	cd ../frontend && npm run build
 
 stop:
 	@if [ -f "$(PID_FILE)" ]; then \

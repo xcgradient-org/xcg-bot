@@ -9,6 +9,8 @@ make -C internal-htmls online
 
 That command builds the React app, stops the previous internal server on the configured port, and starts a fresh one in the background. Logs are written to `internal-htmls/internal-server.log`.
 
+The React app now lives in `frontend/` and the API server lives in `backend/`. `internal-htmls/server.py` is only a compatibility launcher.
+
 Use a different host or port like this:
 
 ```bash
@@ -35,10 +37,8 @@ Share these links with cofounders connected to Tailscale:
 - Meeting Creator: `http://100.72.248.102:8013/meeting-creator`
 - Log Creator: `http://100.72.248.102:8013/log-creator`
 
-For `internal.xcgradient.com`, point a Cloudflare Tunnel to the local server:
+For `internal.xcgradient.com`, point your internal DNS or reverse proxy at the local server over Tailscale. One simple local tunnel command is:
 
 ```bash
 cloudflared tunnel --url http://127.0.0.1:8013
 ```
-
-Then protect `internal.xcgradient.com` with Cloudflare Access.

@@ -10,16 +10,29 @@ GRAPH_REPORT := graphify-out/GRAPH_REPORT.md
 GRAPH_WIKI_INDEX := graphify-out/wiki/index.md
 OBSIDIAN_VAULT := $(HOME)/vault/graphify/xcg-bot
 
-.PHONY: help run test graph graph-build graph-no-obsidian validate-graph clean-graph show-graph-paths
+.PHONY: help run web bot build-frontend test graph graph-build graph-no-obsidian validate-graph clean-graph show-graph-paths
 
 help:
 	@printf "Targets:\n"
-	@printf "  make run   - start the Discord bot\n"
+	@printf "  make web   - build frontend and start the internal website\n"
+	@printf "  make bot   - start the Discord bot adapter\n"
+	@printf "  make run   - alias for make bot\n"
+	@printf "  make build-frontend - build the React frontend\n"
 	@printf "  make test  - run unit tests\n"
 	@printf "  make graph - rebuild the code graph and open the Obsidian vault\n"
 
 run:
 	$(PYTHON) main.py
+
+bot:
+	$(PYTHON) main.py
+
+web:
+	$(MAKE) -C internal-htmls online
+
+build-frontend:
+	cd frontend && npm install
+	cd frontend && npm run build
 
 test:
 	$(PYTHON) -m unittest -q tests.test_xcg_bot

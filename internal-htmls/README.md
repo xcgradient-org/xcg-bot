@@ -1,11 +1,11 @@
 # Internal Tools
 
-This folder contains the React internal tools and the Python backend that talks to Notion, the LLM parser, and Discord.
+This folder is now a compatibility launcher for the internal website. The React app lives in `frontend/` and the Python API lives in `backend/`.
 
 Build the frontend:
 
 ```bash
-cd internal-htmls/app
+cd frontend
 npm install
 npm run build
 ```
@@ -34,18 +34,25 @@ The old URLs still redirect when the React build exists:
 API routes:
 
 - `GET /api/projects`
+- `GET /api/week`
+- `GET /api/current-week`
+- `GET /health`
 - `POST /api/parse`
+- `POST /api/tasks/parse`
 - `POST /api/preview-ids`
+- `POST /api/tasks/preview-ids`
 - `POST /api/tasks`
 - `POST /api/okr/parse-krs`
+- `POST /api/okrs/parse-krs`
 - `POST /api/okr/push`
+- `POST /api/okrs`
 - `POST /api/meetings/parse`
 - `POST /api/meetings`
-- `GET /api/current-week`
-- `GET /api/week`
 - `POST /api/week/rollover`
 - `POST /api/log/preview`
+- `POST /api/logs/preview`
 - `POST /api/log`
+- `POST /api/logs`
 
 Required environment variables are loaded from the repo `.env`:
 
@@ -63,4 +70,4 @@ Optional overrides:
 - `NOTION_OBJECTIVES_DB_ID` or `NOTION_OBJECTIVES_DB`
 - `NOTION_KRS_DB_ID` or `NOTION_KRS_DB`
 
-For `internal.xcgradient.com`, run the server on `127.0.0.1` and point Cloudflare Tunnel to `http://127.0.0.1:8013`, then protect the hostname with Cloudflare Access.
+For `internal.xcgradient.com`, run the server on `127.0.0.1` or the Tailscale IP and point your internal DNS or reverse proxy to that address.

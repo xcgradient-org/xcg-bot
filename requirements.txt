@@ -2,3 +2,5 @@ discord.py>=2.3
 notion-client
 python-dotenv
 pytz
+fastapi
+uvicorn
