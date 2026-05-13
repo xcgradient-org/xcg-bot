@@ -4,7 +4,7 @@ import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
 from types import SimpleNamespace
-from typing import Iterable
+from typing import Any, Iterable
 
 import pytz
 
@@ -88,7 +88,6 @@ def sync_founder_streak_from_daily_logs(notion, founder_name: str, today: date |
             row["id"],
             current_streak=new_current,
             best_streak=new_best,
-            last_log_iso=new_last_log_iso,
         )
         LOGGER.info("Synced streak for %s from Daily Logs: current=%s best=%s.", founder_name, new_current, new_best)
     return new_current, new_best, new_last_log_iso
@@ -183,3 +182,30 @@ async def daily_reset_loop(notion, reflection) -> None:
 
 def start_daily_reset_task(bot, notion, reflection):
     return bot.loop.create_task(daily_reset_loop(notion, reflection))
+
+
+class StreaksService:
+    def __init__(self, runtime) -> None:
+        self.runtime = runtime
+
+    def sync_all(self) -> dict[str, Any]:
+        today = datetime.now(MADRID_TZ).date()
+        results: list[dict[str, Any]] = []
+        for row in self.runtime.notion.get_all_streak_rows():
+            founder_name = self.runtime.notion.founder_name(row)
+            if not founder_name:
+                continue
+            try:
+                current, best, last_log_iso = sync_founder_streak_from_daily_logs(
+                    self.runtime.notion, founder_name, today
+                )
+                results.append({
+                    "founder": founder_name,
+                    "current_streak": current,
+                    "best_streak": best,
+                    "last_log_iso": last_log_iso,
+                })
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.exception("Streak sync failed for %s: %s", founder_name, exc)
+                results.append({"founder": founder_name, "error": str(exc)})
+        return {"today_iso": today.isoformat(), "synced": results}

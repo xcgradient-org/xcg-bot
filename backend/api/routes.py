@@ -91,4 +91,8 @@ def build_api_router(services) -> APIRouter:
     def run_weekly_rollover(payload: WeekRolloverRequest) -> dict[str, Any]:
         return _service_call(lambda: services.week.run_weekly_rollover(payload.model_dump()))
 
+    @router.post("/streaks/sync")
+    def sync_streaks() -> dict[str, Any]:
+        return _service_call(services.streaks.sync_all)
+
     return router

@@ -8,6 +8,7 @@ from backend.services.meetings import MeetingsService
 from backend.services.okrs import OKRsService
 from backend.services.projects import ProjectsService
 from backend.services.runtime import InternalRuntime, build_runtime
+from backend.services.streaks import StreaksService
 from backend.services.tasks import TasksService
 from backend.services.week import WeekService
 
@@ -22,6 +23,7 @@ class InternalServices:
     okrs: OKRsService
     meetings: MeetingsService
     claude_usage: ClaudeUsageService
+    streaks: StreaksService
 
 
 def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
@@ -35,4 +37,5 @@ def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
         okrs=OKRsService(active_runtime),
         meetings=MeetingsService(active_runtime),
         claude_usage=ClaudeUsageService(),
+        streaks=StreaksService(active_runtime),
     )

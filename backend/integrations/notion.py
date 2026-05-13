@@ -276,7 +276,6 @@ class NotionService:
         *,
         current_streak: int,
         best_streak: int | None,
-        last_log_iso: str | None | object = UNSET,
     ) -> None:
         schema = self._retrieve_schema(self.team_db_id)
         properties: dict[str, Any] = {}
@@ -284,9 +283,6 @@ class NotionService:
         current_prop_name = self._existing_property_name(schema, "Current Streak") or "Current Streak"
         properties[current_prop_name] = {"number": current_streak}
 
-        if last_log_iso is not UNSET:
-            last_log_prop_name = self._existing_property_name(schema, "Last Log") or "Last Log"
-            properties[last_log_prop_name] = {"date": {"start": last_log_iso} if last_log_iso else None}
         if best_streak is not None:
             best_prop_name = self._existing_property_name(schema, "Best Streak") or "Best Streak"
             properties[best_prop_name] = {"number": best_streak}
@@ -1067,9 +1063,11 @@ class NotionService:
         return founder_name.strip().lower() in tokens
 
     def _daily_log_founder_value(self, row: dict[str, Any]) -> str:
-        explicit = self._property_text(row, "Founder")
-        if explicit:
-            return explicit
+        prop = self._property(row, "Founder")
+        if prop.get("type") != "relation":
+            explicit = self._property_text(row, "Founder")
+            if explicit:
+                return explicit
 
         title = self._page_title(row)
         if not title:

@@ -1445,22 +1445,22 @@ class NotionServiceTests(unittest.TestCase):
 
         self.assertEqual(dates, [dt.date(2026, 4, 28)])
 
-    def test_update_streak_row_can_clear_last_log(self) -> None:
+    def test_update_streak_row_writes_current_and_best(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily-db", team_db_id="team")
         service.client = MagicMock()
+        schema = {"Current Streak": {"type": "number"}, "Best Streak": {"type": "number"}}
 
-        service.update_streak_row(
-            "streak-row",
-            current_streak=0,
-            best_streak=12,
-            last_log_iso=None,
-        )
+        with patch.object(service, "_retrieve_schema", return_value=schema):
+            service.update_streak_row(
+                "streak-row",
+                current_streak=0,
+                best_streak=12,
+            )
 
         service.client.pages.update.assert_called_once_with(
             page_id="streak-row",
             properties={
                 "Current Streak": {"number": 0},
-                "Last Log": {"date": None},
                 "Best Streak": {"number": 12},
             },
         )
