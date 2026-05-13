@@ -1,40 +1,25 @@
 import { useEffect, useState } from "react";
-import { apiJson, postJson } from "../lib/api.js";
+import { apiJson, invalidateCache, peekCache, postJson } from "../lib/api.js";
+import AppHeader from "../components/AppHeader.jsx";
+import AppFooter from "../components/AppFooter.jsx";
+import { ROUTES } from "../lib/routes.js";
 
-const tools = [
-  {
-    href: "/task-creator",
-    eyebrow: "Weekly execution",
-    title: "Task Creator",
-    description: "Parse founder task notes, reserve Notion IDs, and push weekly tasks.",
-    meta: "Tasks",
-  },
-  {
-    href: "/okr-creator",
-    eyebrow: "Strategy",
-    title: "OKR Creator",
-    description: "Create objectives and measurable key results in the Notion OKR databases.",
-    meta: "Objectives",
-  },
-  {
-    href: "/meeting-creator",
-    eyebrow: "Cadence",
-    title: "Meeting Creator",
-    description: "Schedule a meeting, write it to Notion, and announce it in Discord.",
-    meta: "Meetings",
-  },
-];
 
 function WeekSwitcher() {
-  const [week, setWeek] = useState(null);
+  const initialWeek = peekCache("/api/current-week");
+  const [week, setWeek] = useState(initialWeek);
+  const [weekLoading, setWeekLoading] = useState(!initialWeek);
   const [state, setState] = useState("idle");
   const [message, setMessage] = useState("");
 
   async function loadWeek() {
     try {
-      setWeek(await apiJson("/api/current-week", { timeoutMs: 12000 }));
+      if (!week) setWeekLoading(true);
+      setWeek(await apiJson("/api/current-week", { timeoutMs: 12000, cacheTtlMs: 10 * 60 * 1000 }));
     } catch (exc) {
       setMessage(exc.message || "Week unavailable");
+    } finally {
+      setWeekLoading(false);
     }
   }
 
@@ -44,6 +29,7 @@ function WeekSwitcher() {
     setMessage("");
     try {
       const result = await postJson("/api/week/rollover", { current_week: week.current_week }, { timeoutMs: 90000 });
+      invalidateCache("/api/current-week");
       setWeek({ current_week: result.to_week, next_week: result.to_week });
       setState("success");
       setMessage(`Moved ${result.moved_count} task${result.moved_count === 1 ? "" : "s"}`);
@@ -62,7 +48,11 @@ function WeekSwitcher() {
     <div className={`week-switcher is-${state}`}>
       <button className="week-chip" type="button" onClick={loadWeek} title="Refresh current week">
         <span>Current week</span>
-        <b>{week?.current_week || "--"}</b>
+        {week?.current_week ? (
+          <b>{week.current_week}</b>
+        ) : (
+          <span className={`skeleton-pill ${weekLoading ? "is-loading" : ""}`} aria-hidden="true" />
+        )}
       </button>
       <button className="week-next-btn" type="button" disabled={!week || state === "loading"} onClick={switchWeek}>
         {state === "loading" ? "Switching..." : state === "success" ? "Success" : "Go to next week!"}
@@ -73,16 +63,21 @@ function WeekSwitcher() {
 }
 
 function DailyLogPanel() {
-  const [status, setStatus] = useState(null);
+  const initialStatus = peekCache("/api/logging/status");
+  const [status, setStatus] = useState(initialStatus);
+  const [statusLoading, setStatusLoading] = useState(!initialStatus);
   const [loadingFounder, setLoadingFounder] = useState("");
   const [message, setMessage] = useState("");
 
   async function loadStatus() {
     try {
-      const next = await apiJson("/api/logging/status", { timeoutMs: 12000 });
+      if (!status) setStatusLoading(true);
+      const next = await apiJson("/api/logging/status", { timeoutMs: 12000, cacheTtlMs: 2 * 60 * 1000 });
       setStatus(next);
     } catch (exc) {
       setMessage(exc.message || "Log status unavailable");
+    } finally {
+      setStatusLoading(false);
     }
   }
 
@@ -92,6 +87,7 @@ function DailyLogPanel() {
     setMessage("");
     try {
       const result = await postJson("/api/logging/log-now", { founder }, { timeoutMs: 20000 });
+      invalidateCache("/api/logging/status");
       await loadStatus();
       if (result.created) {
         setMessage(`${result.founder.name} logged at ${result.logged_at || "--:--"}`);
@@ -117,22 +113,33 @@ function DailyLogPanel() {
     <div className="daily-log-panel">
       <div className="daily-log-head">
         <span>Log day</span>
-        <b>{status?.today_iso || "--"}</b>
+        {status?.today_iso ? (
+          <b>{status.today_iso}</b>
+        ) : (
+          <span className={`skeleton-pill ${statusLoading ? "is-loading" : ""}`} aria-hidden="true" />
+        )}
       </div>
       <div className="daily-log-founders">
-        {(status?.founders || []).map((founder) => (
-          <button
-            className={`daily-log-btn ${founder.logged ? "is-logged" : ""}`}
-            key={founder.founder}
-            type="button"
-            disabled={Boolean(loadingFounder) || founder.logged}
-            onClick={() => logNow(founder.founder)}
-            title={founder.logged ? `${founder.founder_name} logged at ${founder.logged_at}` : `Log ${founder.founder_name}`}
-          >
-            <span>{founder.role}</span>
-            <b>{founder.logged ? `Logged ${founder.logged_at || ""}` : loadingFounder === founder.founder ? "Logging..." : "Log now"}</b>
-          </button>
-        ))}
+        {status?.founders?.length ? (
+          status.founders.map((founder) => (
+            <button
+              className={`daily-log-btn ${founder.logged ? "is-logged" : ""}`}
+              key={founder.founder}
+              type="button"
+              disabled={Boolean(loadingFounder) || founder.logged}
+              onClick={() => logNow(founder.founder)}
+              title={founder.logged ? `${founder.founder_name} logged at ${founder.logged_at}` : `Log ${founder.founder_name}`}
+            >
+              <span>{founder.role}</span>
+              <b>{founder.logged ? `Logged ${founder.logged_at || ""}` : loadingFounder === founder.founder ? "Logging..." : "Log now"}</b>
+            </button>
+          ))
+        ) : (
+          <>
+            <span className={`daily-log-btn skeleton-btn ${statusLoading ? "is-loading" : ""}`} aria-hidden="true" />
+            <span className={`daily-log-btn skeleton-btn ${statusLoading ? "is-loading" : ""}`} aria-hidden="true" />
+          </>
+        )}
       </div>
       {message ? <span className="week-message">{message}</span> : null}
     </div>
@@ -140,30 +147,16 @@ function DailyLogPanel() {
 }
 
 export default function Home() {
-  document.title = "XC Gradient — Internal";
+  useEffect(() => { document.title = "XC Gradient — Internal"; }, []);
   return (
     <>
-      <header className="bar internal-home-bar">
-        <div className="bar-inner">
-          <div className="wordmark">
-            <span className="dot" />
-            <span>XC&nbsp;Gradient</span>
-            <span className="sep">/</span>
-            <span className="sub">Internal</span>
-          </div>
-          <nav className="internal-home-nav" aria-label="Internal tools">
-            <a href="/task-creator">Tasks</a>
-            <a href="/okr-creator">OKRs</a>
-            <a href="/meeting-creator">Meetings</a>
-          </nav>
-          <div className="internal-status">
-            <WeekSwitcher />
-            <DailyLogPanel />
-          </div>
-        </div>
-      </header>
+      <AppHeader subtitle="Internal" />
 
       <main className="internal-home">
+        <div className="page-top-bar">
+          <WeekSwitcher />
+          <DailyLogPanel />
+        </div>
         <section className="internal-home-head">
           <p className="internal-kicker">Internal OS</p>
           <h1>XC Gradient command center</h1>
@@ -171,21 +164,18 @@ export default function Home() {
         </section>
 
         <section className="tool-grid" aria-label="Available tools">
-          {tools.map((tool) => (
-            <a className="tool-card" href={tool.href} key={tool.href}>
-              <span className="tool-meta">{tool.meta}</span>
-              <span className="tool-eyebrow">{tool.eyebrow}</span>
-              <strong>{tool.title}</strong>
-              <span>{tool.description}</span>
+          {ROUTES.map(({ path, cardMeta, cardEyebrow, cardTitle, cardDescription }) => (
+            <a className="tool-card" href={path} key={path}>
+              <span className="tool-meta">{cardMeta}</span>
+              <span className="tool-eyebrow">{cardEyebrow}</span>
+              <strong>{cardTitle}</strong>
+              <span>{cardDescription}</span>
             </a>
           ))}
         </section>
       </main>
 
-      <footer className="foot">
-        <span>Internal · XC Gradient · React</span>
-        <span>Cloudflare Access ready</span>
-      </footer>
+      <AppFooter left="Internal · XC Gradient · React" right="Cloudflare Access ready" />
     </>
   );
 }

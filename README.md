@@ -33,7 +33,7 @@ This repo now centers on the internal website for XC Gradient. The Discord bot r
 
 Start the internal website:
 ```bash
-make online
+make web
 ```
 
 Start the Discord adapter:

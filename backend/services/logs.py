@@ -68,20 +68,22 @@ class LogsService:
     def log_now(self, payload: dict[str, Any]) -> dict[str, Any]:
         founder = resolve_founder(payload)
         ctx = current_context()
+        logged_at_iso = datetime.now(MADRID_TZ).isoformat()
         result = self.auto_create_log_for_founder(
             founder_name=founder["name"],
             founder_role=founder["role"],
             today_iso=ctx.today_iso,
             week_code=ctx.week_code,
             raw_notes="Manual end-of-day log from the internal site.",
+            logged_at_iso=logged_at_iso,
         )
         row = self.runtime.notion.find_daily_log(founder["name"], ctx.today_iso)
         return {
             "founder": founder,
             "today_iso": ctx.today_iso,
             "week_code": result.get("week_code") or ctx.week_code,
-            "logged": row is not None,
-            "logged_at": self._row_logged_at(row),
+            "logged": bool(result.get("created")) or row is not None,
+            "logged_at": result.get("logged_at") or self._row_logged_at(row),
             "created": bool(result.get("created")),
             "reason": result.get("reason"),
             "completed_count": result.get("completed_count", 0),
@@ -143,6 +145,7 @@ class LogsService:
             founder_role=founder["role"],
             week_code=ctx.week_code,
             today_iso=ctx.today_iso,
+            logged_at_iso=datetime.now(MADRID_TZ).isoformat(),
             completed_task_ids=self.runtime.notion.page_ids(selected_tasks),
             notes_text=reflection_text,
         )
@@ -193,6 +196,7 @@ class LogsService:
         today_iso: str,
         week_code: str,
         raw_notes: str = "Automatic log created from completed tasks.",
+        logged_at_iso: str | None = None,
     ) -> dict[str, Any]:
         existing_row = self.runtime.notion.find_daily_log(founder_name, today_iso)
         if existing_row is not None:
@@ -243,6 +247,7 @@ class LogsService:
             founder_role=founder_role,
             week_code=active_week or week_code,
             today_iso=today_iso,
+            logged_at_iso=logged_at_iso,
             completed_task_ids=self.runtime.notion.page_ids(completed_tasks),
             notes_text=reflection_text,
         )
@@ -251,6 +256,7 @@ class LogsService:
             "created": True,
             "today_iso": today_iso,
             "week_code": active_week or week_code,
+            "logged_at": self._format_logged_at(logged_at_iso),
             "completed_count": len(completed_tasks),
             "streak": streak,
         }
@@ -258,7 +264,20 @@ class LogsService:
     def _row_logged_at(self, row: dict[str, Any] | None) -> str | None:
         if not row:
             return None
-        created_time = str(row.get("created_time") or "").strip()
+        created_time = str(
+            self.runtime.notion._property_date(row, "Date")  # noqa: SLF001
+            or self.runtime.notion._property_date(row, "Created on")  # noqa: SLF001
+            or row.get("created_time")
+            or ""
+        ).strip()
+        if not created_time:
+            return None
+        return self._format_logged_at(created_time)
+
+    def _format_logged_at(self, timestamp_text: str | None) -> str | None:
+        if not timestamp_text:
+            return None
+        created_time = str(timestamp_text).strip()
         if not created_time:
             return None
         normalized = created_time.replace("Z", "+00:00")

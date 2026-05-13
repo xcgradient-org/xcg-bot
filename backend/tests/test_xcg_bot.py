@@ -320,6 +320,7 @@ class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
             founder_role="CEO",
             week_code="26-W20",
             today_iso="2026-05-12",
+            logged_at_iso="2026-05-13T05:00:00+02:00",
             completed_task_ids=["task-1"],
             notes_text="Auto-generated reflection",
         )
@@ -335,6 +336,7 @@ class WebLoggingTests(unittest.TestCase):
         runtime.notion = notion_service
         runtime.reflection = reflection_service
         service = LogsService(runtime)
+        notion_service._property_date.return_value = ""
 
         notion_service.find_daily_log.side_effect = [
             {"created_time": "2026-05-12T19:03:00.000Z"},
@@ -358,6 +360,7 @@ class WebLoggingTests(unittest.TestCase):
         runtime.notion = notion_service
         runtime.reflection = reflection_service
         service = LogsService(runtime)
+        notion_service._property_date.return_value = ""
 
         notion_service.find_daily_log.side_effect = [
             None,
@@ -373,14 +376,19 @@ class WebLoggingTests(unittest.TestCase):
         notion_service.streaks_available.return_value = False
         reflection_service.generate_reflection.return_value = "Manual log"
 
+        fake_now = streaks.MADRID_TZ.localize(dt.datetime(2026, 5, 12, 21, 3, 0))
         with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
-            payload = service.log_now({"founder": "oriol"})
+            with patch("backend.services.logs.datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = fake_now
+                mocked_datetime.fromisoformat.side_effect = dt.datetime.fromisoformat
+                payload = service.log_now({"founder": "oriol"})
 
         notion_service.create_daily_log.assert_called_once_with(
             founder_name="Oriol",
             founder_role="CEO",
             week_code="26-W20",
             today_iso="2026-05-12",
+            logged_at_iso="2026-05-12T21:03:00+02:00",
             completed_task_ids=["task-1"],
             notes_text="Manual log",
         )
@@ -395,6 +403,7 @@ class WebLoggingTests(unittest.TestCase):
         runtime.notion = notion_service
         runtime.reflection = reflection_service
         service = LogsService(runtime)
+        notion_service._property_date.return_value = ""
 
         notion_service.find_daily_log.return_value = None
         notion_service.query_log_tasks.return_value = ([], [], "26-W20")
@@ -1356,6 +1365,7 @@ class NotionServiceTests(unittest.TestCase):
         schema = {
             "Title": {"type": "title"},
             "Date": {"type": "date"},
+            "Created on": {"type": "date"},
             "Founder": {"type": "select"},
             "Role": {"type": "select"},
             "Week": {"type": "select", "select": {"options": [{"name": "26-W15"}]}},
@@ -1368,6 +1378,7 @@ class NotionServiceTests(unittest.TestCase):
                 founder_role="CEO",
                 week_code="26-W15",
                 today_iso="2026-04-10",
+                logged_at_iso="2026-04-10T21:03:00+02:00",
                 completed_task_ids=["page-1", "page-2"],
                 notes_text="reflection",
             )
@@ -1377,6 +1388,8 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["properties"]["Founder"]["select"]["name"], "Oriol")
         self.assertEqual(kwargs["properties"]["Role"]["select"]["name"], "CEO")
         self.assertEqual(kwargs["properties"]["Week"]["select"]["name"], "26-W15")
+        self.assertEqual(kwargs["properties"]["Date"]["date"]["start"], "2026-04-10T21:03:00+02:00")
+        self.assertEqual(kwargs["properties"]["Created on"]["date"]["start"], "2026-04-10T21:03:00+02:00")
         self.assertEqual(kwargs["properties"]["Tasks completed"]["relation"], [{"id": "page-1"}, {"id": "page-2"}])
         self.assertEqual(kwargs["properties"]["Notes"]["rich_text"][0]["text"]["content"], "reflection")
 
@@ -1387,6 +1400,7 @@ class NotionServiceTests(unittest.TestCase):
         schema = {
             "Title": {"type": "title"},
             "Date": {"type": "date"},
+            "Created on": {"type": "date"},
             "Tasks completed": {"type": "relation"},
             "Notes": {"type": "rich_text"},
         }
@@ -1397,13 +1411,15 @@ class NotionServiceTests(unittest.TestCase):
                 founder_role="CEO",
                 week_code="26-W19",
                 today_iso="2026-05-07",
+                logged_at_iso="2026-05-08T01:12:00+02:00",
                 completed_task_ids=["page-1"],
                 notes_text="reflection",
             )
 
         _, kwargs = service.client.pages.create.call_args
         self.assertEqual(kwargs["properties"]["Title"]["title"][0]["text"]["content"], "Oriol · 26-W19 · 2026-05-07")
-        self.assertEqual(kwargs["properties"]["Date"]["date"]["start"], "2026-05-07")
+        self.assertEqual(kwargs["properties"]["Date"]["date"]["start"], "2026-05-07T01:12:00+02:00")
+        self.assertEqual(kwargs["properties"]["Created on"]["date"]["start"], "2026-05-08T01:12:00+02:00")
         self.assertNotIn("Founder", kwargs["properties"])
         self.assertNotIn("Role", kwargs["properties"])
         self.assertNotIn("Week", kwargs["properties"])

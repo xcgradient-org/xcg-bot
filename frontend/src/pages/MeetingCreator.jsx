@@ -1,5 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { postJson } from "../lib/api.js";
+import AppHeader from "../components/AppHeader.jsx";
+import AppFooter from "../components/AppFooter.jsx";
+import LoadingDots from "../components/LoadingDots.jsx";
 
 const founders = [
   { id: "oriol", name: "Oriol", role: "CEO", avatar: "OR" },
@@ -24,12 +27,8 @@ function titleSuggestion(type) {
   return "Meeting";
 }
 
-function LoadingDots() {
-  return <span className="loading-dots"><span /><span /><span /></span>;
-}
-
 export default function MeetingCreator() {
-  document.title = "XC Gradient - Meeting Creator";
+  useEffect(() => { document.title = "XC Gradient — Meeting Creator"; }, []);
   const [phase, setPhase] = useState(1);
   const [owners, setOwners] = useState([]);
   const [type, setType] = useState("Weekly Sync");
@@ -130,14 +129,10 @@ export default function MeetingCreator() {
 
   return (
     <>
-      <header className="bar">
-        <div className="bar-inner">
-          <a className="wordmark" href="/">
-            <span className="dot" />
-            <span>XC&nbsp;Gradient</span>
-            <span className="sep">/</span>
-            <span className="sub">Meeting Creator</span>
-          </a>
+      <AppHeader subtitle="Meeting Creator" />
+
+      <main>
+        <div className="page-top-bar">
           <nav className="stepper">
             {[["01", "Configure"], ["02", "Details"], ["03", "Review"]].map(([num, label], index) => {
               const step = index + 1;
@@ -149,15 +144,11 @@ export default function MeetingCreator() {
             })}
           </nav>
           <div className="meeting-pill">
-            <a className="home-btn" href="/">Home</a>
             <span className={`conn ${online ? "is-online" : "is-offline"}`}><span className="dot" />{online ? "Live" : "Check"}</span>
             <span className="label">Target</span>
             <span className="code">{target}</span>
           </div>
         </div>
-      </header>
-
-      <main>
         <section className={`phase ${phase === 1 ? "is-active" : ""}`}>
           <div className="phase-head">
             <h1><span className="num">01</span>Configure the meeting</h1>
@@ -195,7 +186,7 @@ export default function MeetingCreator() {
           </div>
 
           <div className="cta-row">
-            <a className="btn btn-secondary" href="/">Back home</a>
+            <div />
             <button className="btn btn-primary" type="button" disabled={!canContinue} onClick={() => setPhase(2)}>Continue to details<span className="arrow">-&gt;</span></button>
           </div>
         </section>
@@ -289,10 +280,7 @@ export default function MeetingCreator() {
         </section>
       </main>
 
-      <footer className="foot">
-        <span>Internal · XC Gradient · v0.1</span>
-        <span>Notion + Discord</span>
-      </footer>
+      <AppFooter left="Internal · XC Gradient · v0.1" right="Notion + Discord" />
     </>
   );
 }

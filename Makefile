@@ -4,11 +4,12 @@ PORT ?= 8013
 PID_FILE ?= .internal-server.pid
 LOG_FILE ?= internal-server.log
 
-.PHONY: help run web online stop status bot build-frontend test
+.PHONY: help run web web-online online stop status bot build-frontend test
 
 help:
 	@printf "Targets:\n"
-	@printf "  make web   - alias for make online\n"
+	@printf "  make web   - rebuild and bring the website online (with health check)\n"
+	@printf "  make web-online - rebuild and bring the website online (with health check)\n"
 	@printf "  make online - build frontend and start the internal website\n"
 	@printf "  make stop  - stop the internal website\n"
 	@printf "  make status - show what is listening on the internal port\n"
@@ -30,7 +31,21 @@ build-frontend:
 test:
 	$(PYTHON) -m unittest -q backend.tests.test_xcg_bot
 
-web: online
+web: web-online
+
+web-online:
+	@$(MAKE) --no-print-directory online HOST=0.0.0.0 PORT="$(PORT)"
+	@echo "Waiting for health endpoint at http://127.0.0.1:$(PORT)/health"
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -fsS "http://127.0.0.1:$(PORT)/health" >/dev/null; then \
+			echo "Website is online at http://127.0.0.1:$(PORT)/"; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "Health check failed. Last log lines:"; \
+	tail -40 "$(LOG_FILE)"; \
+	exit 1
 
 stop:
 	@if [ -f "$(PID_FILE)" ]; then \

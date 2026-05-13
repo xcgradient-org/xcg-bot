@@ -465,13 +465,20 @@ textarea {
   border-radius: 999px;
   background: var(--card);
 }
-.internal-status {
-  justify-self: end;
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+.internal-home-nav a:hover:not([aria-current="page"]) {
+  border-color: var(--ink);
+  background: #fff;
+}
+.internal-home-nav a[aria-current="page"] {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+.nav-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--line-strong);
+  flex-shrink: 0;
 }
 .home-btn {
   display: inline-flex;
@@ -631,9 +638,39 @@ textarea {
   cursor: default;
   opacity: 1;
 }
+.skeleton-pill,
+.skeleton-btn {
+  display: inline-flex;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--line) 70%, var(--paper));
+  border: 1px solid color-mix(in oklch, var(--line-strong) 60%, var(--paper));
+}
+.skeleton-pill {
+  width: 54px;
+  height: 20px;
+}
+.skeleton-btn {
+  width: 138px;
+  min-height: 32px;
+  padding: 0;
+}
+.skeleton-pill.is-loading,
+.skeleton-btn.is-loading {
+  background:
+    linear-gradient(90deg,
+      color-mix(in oklch, var(--line) 82%, var(--paper)) 25%,
+      color-mix(in oklch, var(--line-strong) 35%, var(--paper)) 50%,
+      color-mix(in oklch, var(--line) 82%, var(--paper)) 75%);
+  background-size: 230% 100%;
+  animation: skeletonShimmer 1.1s linear infinite;
+}
 @keyframes weekPulse {
   0%, 100% { transform: translateY(0); opacity: .8; }
   50% { transform: translateY(-1px); opacity: 1; }
+}
+@keyframes skeletonShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -20% 0; }
 }
 .internal-home {
   max-width: 980px;
@@ -699,6 +736,16 @@ textarea {
   color: var(--paper);
   border-radius: 4px;
   padding: 4px 7px;
+}
+
+.page-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 28px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--line);
 }
 
 @media (max-width: 720px) {

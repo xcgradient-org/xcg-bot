@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef } from "react";
+import AppHeader from "../components/AppHeader.jsx";
 
 function extract(html, pattern) {
   const match = html.match(pattern);
   return match ? match[1] : "";
 }
 
-export default function LegacyToolPage({ html, title }) {
+export default function LegacyToolPage({ html, title, subtitle }) {
   const rootRef = useRef(null);
   const pieces = useMemo(() => {
     const style = extract(html, /<style>([\s\S]*?)<\/style>/i);
@@ -48,5 +49,10 @@ export default function LegacyToolPage({ html, title }) {
     };
   }, [pieces, title]);
 
-  return <div ref={rootRef} />;
+  return (
+    <>
+      <AppHeader subtitle={subtitle} />
+      <div ref={rootRef} />
+    </>
+  );
 }

@@ -158,17 +158,23 @@ class NotionService:
         founder_role: str,
         week_code: str,
         today_iso: str,
+        logged_at_iso: str | None = None,
         completed_task_ids: list[str],
         notes_text: str,
     ) -> dict[str, Any]:
         schema = self._retrieve_schema(self.daily_logs_db_id)
         properties: dict[str, Any] = {}
+        business_day_timestamp = self._business_day_timestamp(today_iso, logged_at_iso)
 
         title_name = self._title_property_name(schema)
         properties[title_name] = {"title": [{"type": "text", "text": {"content": f"{founder_name} · {week_code} · {today_iso}"}}]}
 
         if prop := self._get_schema_property(schema, "Date"):
-            properties[self._property_name(prop, "Date")] = {"date": {"start": today_iso}}
+            properties[self._property_name(prop, "Date")] = {"date": {"start": business_day_timestamp}}
+
+        if prop := self._get_schema_property(schema, "Created on"):
+            timestamp = str(logged_at_iso or "").strip() or business_day_timestamp
+            properties[self._property_name(prop, "Created on")] = {"date": {"start": timestamp}}
 
         used_names = {title_name}
 
@@ -1074,6 +1080,20 @@ class NotionService:
         now = datetime.now()
         iso_year, iso_week, _ = now.isocalendar()
         return f"{iso_year % 100:02d}-W{iso_week:02d}"
+
+    def _business_day_timestamp(self, business_day_iso: str, logged_at_iso: str | None) -> str:
+        raw = str(logged_at_iso or "").strip()
+        if not raw:
+            return business_day_iso
+        normalized = raw.replace("Z", "+00:00")
+        try:
+            logged_at = datetime.fromisoformat(normalized)
+        except ValueError:
+            return business_day_iso
+        business_day = date.fromisoformat(business_day_iso)
+        if logged_at.tzinfo is None:
+            return datetime.combine(business_day, logged_at.time()).isoformat(timespec="seconds")
+        return datetime.combine(business_day, logged_at.timetz()).isoformat(timespec="seconds")
 
     def get_current_week_from_settings(self) -> str:
         if not self.settings_db_id:

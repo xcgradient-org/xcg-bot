@@ -121,7 +121,8 @@ One entry per founder per day. Created either when the founder clicks the manual
 | Property | Type | Notes |
 |----------|------|-------|
 | `Title` | title | Auto-formatted: `{Name} · {Week} · {YYYY-MM-DD}`, e.g. `Arnau · 26-W19 · 2026-05-06` |
-| `Date` | date | ISO date of the log |
+| `Date` | date | Business-day datetime of the log. It stores the real clock time, but between `00:00` and `04:59` Madrid it still uses the previous business day. Example: a log created at `2026-05-08 01:12` can be stored as `2026-05-07 01:12`. |
+| `Created on` | date | Exact datetime when the founder logged or when the automatic finalizer created the row. |
 | `Founder` | relation → Team | **Relation**, not text. The team member who logged. |
 | `Tasks completed` | relation → Tasks | Tasks marked done in this session |
 | `Notes` | rich_text | Free-form EOD notes / reflection |

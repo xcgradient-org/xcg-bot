@@ -5,10 +5,12 @@ Run this from the repo root:
 ```bash
 cd /home/sterry/Desktop/xcgradient-org/xcg-bot
 uv sync --dev
-make online
+make web
 ```
 
-That command builds the React app, stops the previous internal server on the configured port, and starts a fresh one in the background. Logs are written to `internal-server.log`.
+`make web` rebuilds the React app, stops the previous internal server on the configured port, starts a fresh one in the background, and waits for `/health` to report ready. Logs are written to `internal-server.log`.
+
+You can still use `make online` directly if you do not need the extra health check wrapper.
 
 Use a different host or port like this:
 

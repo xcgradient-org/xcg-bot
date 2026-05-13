@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from backend.services.claude_usage import ClaudeUsageService
 from backend.services.logs import LogsService
 from backend.services.meetings import MeetingsService
 from backend.services.okrs import OKRsService
@@ -20,6 +21,7 @@ class InternalServices:
     logs: LogsService
     okrs: OKRsService
     meetings: MeetingsService
+    claude_usage: ClaudeUsageService
 
 
 def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
@@ -32,4 +34,5 @@ def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
         logs=LogsService(active_runtime),
         okrs=OKRsService(active_runtime),
         meetings=MeetingsService(active_runtime),
+        claude_usage=ClaudeUsageService(),
     )

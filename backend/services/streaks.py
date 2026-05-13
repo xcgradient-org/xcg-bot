@@ -129,6 +129,7 @@ async def auto_create_missing_daily_logs(notion, reflection, now: datetime | Non
                 founder_role=founder_role,
                 today_iso=target_iso,
                 week_code=week_code,
+                logged_at_iso=local_now.isoformat(),
             )
             result["founder_name"] = founder_name
             results.append(result)

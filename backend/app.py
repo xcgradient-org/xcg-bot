@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     @app.get("/task-creator")
     @app.get("/okr-creator")
     @app.get("/meeting-creator")
+    @app.get("/claude-usage")
     def serve_index():
         index_path = dist_root / "index.html"
         return FileResponse(index_path) if index_path.exists() else FileResponse(ROOT / "frontend" / "index.html")

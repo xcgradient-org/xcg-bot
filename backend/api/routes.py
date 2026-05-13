@@ -83,6 +83,10 @@ def build_api_router(services) -> APIRouter:
     def create_meeting(payload: CreateMeetingRequest) -> dict[str, Any]:
         return _service_call(lambda: services.meetings.create_meeting(payload.model_dump()))
 
+    @router.get("/claude-usage")
+    def claude_usage_status() -> dict[str, Any]:
+        return _service_call(services.claude_usage.get_usage)
+
     @router.post("/week/rollover")
     def run_weekly_rollover(payload: WeekRolloverRequest) -> dict[str, Any]:
         return _service_call(lambda: services.week.run_weekly_rollover(payload.model_dump()))
