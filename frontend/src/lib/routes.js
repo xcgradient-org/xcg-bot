@@ -27,8 +27,8 @@ export const ROUTES = [
     path: "/claude-usage",
     navLabel: "Usage",
     cardEyebrow: "Monitoring",
-    cardTitle: "Claude Usage",
-    cardDescription: "View real-time 5-hour and weekly subscription quota for the corporate account.",
+    cardTitle: "AI Usage",
+    cardDescription: "View real-time subscription quota for every team member across Claude and other providers.",
     cardMeta: "Usage",
   },
 ];

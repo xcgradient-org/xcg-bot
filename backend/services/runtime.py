@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
+from backend.config import default_llm_settings
 from backend.domain.founders import ROLE_TO_ENV
 from backend.integrations.notion import NotionService
 from backend.integrations.reflection import ReflectionService
@@ -83,6 +84,7 @@ class InternalRuntime:
 
 def build_runtime() -> InternalRuntime:
     load_dotenv(ROOT / ".env")
+    llm_base_url, llm_model, llm_api_keys, llm_api_style = default_llm_settings()
     return InternalRuntime(
         notion=NotionService(
             token=env("NOTION_TOKEN"),
@@ -92,19 +94,10 @@ def build_runtime() -> InternalRuntime:
             settings_db_id=env("NOTION_SETTINGS_DB_ID", "NOTION_SETTINGS_DB") or None,
         ),
         reflection=ReflectionService(
-            model=env("LLM_MODEL", default="openai/gpt-oss-20b"),
-            base_url=env("LLM_BASE_URL", default="https://api.groq.com/openai/v1"),
-            api_keys=tuple(
-                key.strip()
-                for key in (
-                    env("LLM_API_KEY"),
-                    env("LLM_API_KEY_2"),
-                    env("LLM_API_KEY_3"),
-                    *env("LLM_API_KEYS").replace("\n", ",").split(","),
-                )
-                if key.strip()
-            ),
-            api_style=env("LLM_API_STYLE", default="openai"),
+            model=llm_model,
+            base_url=llm_base_url,
+            api_keys=llm_api_keys,
+            api_style=llm_api_style,
         ),
         objectives_db_id=env("NOTION_OBJECTIVES_DB_ID", "NOTION_OBJECTIVES_DB", default=DEFAULT_OBJECTIVES_DB_ID),
         krs_db_id=env("NOTION_KRS_DB_ID", "NOTION_KRS_DB", default=DEFAULT_KRS_DB_ID),

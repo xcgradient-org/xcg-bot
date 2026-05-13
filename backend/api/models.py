@@ -64,3 +64,8 @@ class LogNowRequest(FounderPayload):
 
 class WeekRolloverRequest(BaseModel):
     current_week: str | None = None
+
+
+class WeekPwpReportRequest(BaseModel):
+    week: int = Field(ge=0, le=52, description="ISO week number; 0 selects the current week.")
+    person: str = Field(min_length=1, description="Team member: role title, full name, or email.")

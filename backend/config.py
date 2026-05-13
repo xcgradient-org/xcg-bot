@@ -39,6 +39,7 @@ class Settings:
     llm_api_style: str
     internal_host: str
     internal_port: int
+    internal_api_token: str | None
     meeting_task_project_id: str | None
     meeting_task_project_name: str | None
 
@@ -168,6 +169,11 @@ def load_settings() -> Settings:
         llm_api_style=llm_api_style,
         internal_host=os.getenv("INTERNAL_HTMLS_HOST", "127.0.0.1").strip() or "127.0.0.1",
         internal_port=int(os.getenv("INTERNAL_HTMLS_PORT", "8012")),
+        internal_api_token=(
+            os.getenv("INTERNAL_API_TOKEN", "").strip()
+            or os.getenv("XCG_INTERNAL_API_TOKEN", "").strip()
+            or None
+        ),
         meeting_task_project_id=os.getenv("NOTION_MEETING_TASK_PROJECT_ID", "").strip() or None,
         meeting_task_project_name=os.getenv("NOTION_MEETING_TASK_PROJECT_NAME", "").strip() or None,
     )

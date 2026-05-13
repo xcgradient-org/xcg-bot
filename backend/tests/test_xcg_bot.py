@@ -16,6 +16,7 @@ if str(BOT_DIR) not in sys.path:
 from backend import config as main
 from backend.integrations import notion, reflection
 from backend.services import internal_tools as internal_server
+from backend.services import runtime as runtime_service
 from backend.services import streaks
 from backend.services.logs import LogsService
 from bot.commands import log_command, meeting_command, meetings, task_command
@@ -85,6 +86,33 @@ class LoadSettingsTests(unittest.TestCase):
         self.assertEqual(settings.llm_api_key, "key-1")
         self.assertEqual(settings.llm_api_keys, ("key-1", "key-2"))
         self.assertEqual(settings.llm_api_style, "openai")
+        self.assertIsNone(settings.internal_api_token)
+
+    @patch("backend.config.load_environment")
+    def test_load_settings_reads_internal_api_token(self, load_environment: MagicMock) -> None:
+        load_environment.return_value = Path("/tmp/fake.env")
+        env = {
+            "DISCORD_TOKEN": "discord-token",
+            "NOTION_TOKEN": "notion-token",
+            "DISCORD_USER_ID_ORIOL": "111",
+            "DISCORD_USER_ID_ARNAU": "222",
+            "DISCORD_USER_ID_ADAM": "333",
+            "NOTION_TASKS_DB": "tasks-db",
+            "NOTION_DAILY_LOGS_DB": "daily-db",
+            "NOTION_TEAM_DB": "team-db",
+            "NOTION_MEETINGS_DB": "meetings-db",
+            "DISCORD_BLOCKERS_CHANNEL_ID": "123",
+            "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "456",
+            "INTERNAL_API_TOKEN": "secret-token",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with patch(
+                "backend.config.default_llm_settings",
+                return_value=("https://api.groq.com/openai/v1", "openai/gpt-oss-20b", ("key-1",), "openai"),
+            ):
+                settings = main.load_settings()
+
+        self.assertEqual(settings.internal_api_token, "secret-token")
 
     @patch("backend.config.load_environment")
     def test_load_settings_allows_missing_settings_db_id(self, load_environment: MagicMock) -> None:
@@ -107,6 +135,7 @@ class LoadSettingsTests(unittest.TestCase):
                 settings = main.load_settings()
 
         self.assertIsNone(settings.notion_settings_db_id)
+        self.assertIsNone(settings.internal_api_token)
 
     def test_default_llm_settings_uses_groq_defaults(self) -> None:
         with patch.dict("os.environ", {}, clear=True):
@@ -154,6 +183,22 @@ class ReflectionServiceTests(unittest.TestCase):
         service = reflection.ReflectionService(model="openai/gpt-oss-20b")
         payload = {"choices": [{"message": {"content": "chat answer"}}]}
         self.assertEqual(service._extract_text(payload), "chat answer")
+
+    def test_extract_text_supports_segmented_content_payloads(self) -> None:
+        service = reflection.ReflectionService(model="openai/gpt-oss-20b")
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "output_text", "text": "first"},
+                            {"type": "output_text", "text": {"value": "second"}},
+                        ]
+                    }
+                }
+            ]
+        }
+        self.assertEqual(service._extract_text(payload), "first\nsecond")
 
     def test_rejects_local_api_style(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "Local LLM and Gemini fallbacks are disabled"):
@@ -225,6 +270,77 @@ class ReflectionServiceTests(unittest.TestCase):
         self.assertEqual(payload, {"data": [{"id": "openai/gpt-oss-20b"}]})
         self.assertEqual([call.kwargs["api_key"] for call in request_json.call_args_list], ["key-1", "key-2"])
 
+    def test_openai_request_uses_json_object_and_disables_reasoning_for_json_mode(self) -> None:
+        service = reflection.ReflectionService(model="openai/gpt-oss-20b", api_keys=("key-1",))
+        with patch.object(service, "_request_json_with_key", return_value={"choices": []}) as request_json:
+            service._openai_request(
+                system_prompt="base",
+                user_prompt="{}",
+                model="openai/gpt-oss-20b",
+                api_key="key-1",
+                response_mime_type="application/json",
+            )
+        payload = request_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertFalse(payload["include_reasoning"])
+        self.assertIn("valid JSON only", payload["messages"][0]["content"])
+
+    def test_openai_request_omits_include_reasoning_for_models_without_support(self) -> None:
+        service = reflection.ReflectionService(model="llama-3.3-70b-versatile", api_keys=("key-1",))
+        with patch.object(service, "_request_json_with_key", return_value={"choices": []}) as request_json:
+            service._openai_request(
+                system_prompt="base",
+                user_prompt="{}",
+                model="llama-3.3-70b-versatile",
+                api_key="key-1",
+                response_mime_type="application/json",
+            )
+        payload = request_json.call_args.kwargs["payload"]
+        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertNotIn("include_reasoning", payload)
+
+    def test_model_request_json_mode_uses_json_model_priority_per_key(self) -> None:
+        service = reflection.ReflectionService(model="openai/gpt-oss-20b", api_keys=("key-1", "key-2"))
+        with patch.object(
+            service,
+            "_openai_request",
+            side_effect=[RuntimeError("rate limit"), {"choices": [{"message": {"content": "{\"ok\": true}"}}]}],
+        ) as openai_request:
+            payload = service._model_request(
+                system_prompt="s",
+                user_prompt="u",
+                response_mime_type="application/json",
+            )
+        self.assertEqual(payload, {"choices": [{"message": {"content": "{\"ok\": true}"}}]})
+        self.assertEqual([call.kwargs["model"] for call in openai_request.call_args_list], ["openai/gpt-oss-20b", "openai/gpt-oss-20b"])
+        self.assertEqual([call.kwargs["api_key"] for call in openai_request.call_args_list], ["key-1", "key-2"])
+
+    def test_model_request_skips_remaining_models_for_invalid_api_key(self) -> None:
+        service = reflection.ReflectionService(model="openai/gpt-oss-20b", api_keys=("key-1",))
+        with patch.object(
+            service,
+            "_openai_request",
+            side_effect=RuntimeError('LLM request failed: 401 {"error":{"code":"invalid_api_key"}}'),
+        ) as openai_request:
+            with self.assertRaisesRegex(RuntimeError, "All configured LLM key/model combinations failed"):
+                service._model_request(system_prompt="s", user_prompt="u")
+        openai_request.assert_called_once()
+
+    def test_model_request_fails_fast_on_non_retriable_json_validation_error(self) -> None:
+        service = reflection.ReflectionService(model="openai/gpt-oss-20b", api_keys=("key-1", "key-2"))
+        with patch.object(
+            service,
+            "_openai_request",
+            side_effect=RuntimeError('LLM request failed: 400 {"error":{"code":"json_validate_failed"}}'),
+        ) as openai_request:
+            with self.assertRaisesRegex(RuntimeError, "Non-retriable JSON validation failure"):
+                service._model_request(
+                    system_prompt="s",
+                    user_prompt="u",
+                    response_mime_type="application/json",
+                )
+        openai_request.assert_called_once()
+
     def test_build_fallback_reflection_includes_tasks_and_notes(self) -> None:
         service = reflection.ReflectionService(model="openai/gpt-oss-20b")
 
@@ -291,6 +407,37 @@ class StreakTests(unittest.TestCase):
 
         self.assertFalse(streaks.should_run_startup_reset(before_cutoff))
         self.assertTrue(streaks.should_run_startup_reset(after_cutoff))
+
+
+class RuntimeBuildTests(unittest.TestCase):
+    @patch("backend.services.runtime.load_dotenv")
+    @patch("backend.services.runtime.default_llm_settings")
+    @patch("backend.services.runtime.ReflectionService")
+    @patch("backend.services.runtime.NotionService")
+    def test_build_runtime_uses_shared_llm_defaults(
+        self,
+        notion_service_cls: MagicMock,
+        reflection_service_cls: MagicMock,
+        default_llm_settings: MagicMock,
+        _load_dotenv: MagicMock,
+    ) -> None:
+        notion_service_cls.return_value = MagicMock()
+        reflection_service_cls.return_value = MagicMock()
+        default_llm_settings.return_value = (
+            "https://api.groq.com/openai/v1",
+            "llama-3.3-70b-versatile",
+            ("key-1", "key-2"),
+            "openai",
+        )
+
+        runtime_service.build_runtime()
+
+        reflection_service_cls.assert_called_once_with(
+            model="llama-3.3-70b-versatile",
+            base_url="https://api.groq.com/openai/v1",
+            api_keys=("key-1", "key-2"),
+            api_style="openai",
+        )
 
 
 class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
@@ -1047,9 +1194,6 @@ class NotionServiceTests(unittest.TestCase):
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         del service.client.databases.query
-        service.client.databases.retrieve.return_value = {
-            "data_sources": [{"id": "source-123"}],
-        }
         service.client.data_sources.query.return_value = {
             "results": [{"id": "page-1"}],
             "has_more": False,
@@ -1059,8 +1203,8 @@ class NotionServiceTests(unittest.TestCase):
         result = service._query_all("db-123")
 
         self.assertEqual(result, [{"id": "page-1"}])
-        service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
-        service.client.data_sources.query.assert_called_once_with(data_source_id="source-123", page_size=100)
+        service.client.databases.retrieve.assert_not_called()
+        service.client.data_sources.query.assert_called_once_with(data_source_id="db-123", page_size=100)
 
     def test_primary_data_source_id_returns_first_source(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")

@@ -5,6 +5,9 @@ import AppHeader from "../components/AppHeader.jsx";
 import AppFooter from "../components/AppFooter.jsx";
 import LoadingDots from "../components/LoadingDots.jsx";
 
+const TEAM_USAGE_PATH = "/api/team-usage";
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
 function timeUntil(iso) {
   if (!iso) return null;
   const diff = Math.max(0, new Date(iso) - Date.now());
@@ -45,38 +48,185 @@ function UsageBar({ utilization }) {
   );
 }
 
-function MetricCard({ label, window: win, sublabel }) {
-  if (!win) return null;
-  const reset = timeUntil(win.resets_at);
-  return (
-    <div className="usage-metric-card">
-      <div className="usage-metric-head">
-        <span className="usage-metric-label">{label}</span>
-        {reset && <span className="usage-metric-reset">resets in {reset}</span>}
+function ProviderLabel({ type }) {
+  const labels = { claude_oauth: "Claude", codex: "Codex", openai_api: "OpenAI", anthropic_api: "Anthropic API" };
+  return <span className="sub-provider-name">{labels[type] ?? type}</span>;
+}
+
+function fmtTokens(n) {
+  if (!n && n !== 0) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+  return String(n);
+}
+
+function CodexSubscription({ sub }) {
+  if (sub.status !== "ok") {
+    return (
+      <div className="sub-block sub-block-muted">
+        <div className="sub-head">
+          <ProviderLabel type="codex" />
+          <span className="sub-tier">{sub.tier}</span>
+          <StatusDot status={sub.status} />
+        </div>
+        <p className="sub-status-msg">
+          {sub.status === "not_configured" ? "Not configured" : sub.status}
+        </p>
+        {sub.hint && <code className="sub-hint">{sub.hint}</code>}
       </div>
-      <UsageBar utilization={win.utilization} />
-      {sublabel && <span className="usage-metric-sub">{sublabel}</span>}
+    );
+  }
+
+  const today = sub.today ?? {};
+  const sevenDay = sub.seven_day ?? {};
+
+  return (
+    <div className="sub-block">
+      <div className="sub-head">
+        <ProviderLabel type="codex" />
+        <span className="sub-tier">{sub.tier}</span>
+        <StatusDot status="ok" />
+      </div>
+      {sub.account?.email && (
+        <span className="sub-account-email">{sub.account.email}</span>
+      )}
+      <div className="codex-stats-grid">
+        <div className="codex-stat">
+          <span className="codex-stat-label">Today · in</span>
+          <span className="codex-stat-value">{fmtTokens(today.input_tokens)}</span>
+        </div>
+        <div className="codex-stat">
+          <span className="codex-stat-label">Today · out</span>
+          <span className="codex-stat-value">{fmtTokens(today.output_tokens)}</span>
+        </div>
+        <div className="codex-stat">
+          <span className="codex-stat-label">7d · in</span>
+          <span className="codex-stat-value">{fmtTokens(sevenDay.input_tokens)}</span>
+        </div>
+        <div className="codex-stat">
+          <span className="codex-stat-label">7d · out</span>
+          <span className="codex-stat-value">{fmtTokens(sevenDay.output_tokens)}</span>
+        </div>
+        <div className="codex-stat">
+          <span className="codex-stat-label">7d · sessions</span>
+          <span className="codex-stat-value">{sevenDay.sessions ?? 0}</span>
+        </div>
+        <div className="codex-stat">
+          <span className="codex-stat-label">7d · turns</span>
+          <span className="codex-stat-value">{sevenDay.turns ?? 0}</span>
+        </div>
+      </div>
     </div>
   );
 }
 
-const CLAUDE_USAGE_PATH = "/api/claude-usage";
-const CLAUDE_USAGE_TTL_MS = 5 * 60 * 1000;
+function StatusDot({ status }) {
+  const cls = status === "ok" ? "status-dot ok" : status === "not_configured" ? "status-dot unconfigured" : "status-dot error";
+  return <span className={cls} />;
+}
+
+function ClaudeSubscription({ sub }) {
+  const reset5h = timeUntil(sub.five_hour?.resets_at);
+  const reset7d = timeUntil(sub.seven_day?.resets_at);
+
+  if (sub.status !== "ok") {
+    return (
+      <div className="sub-block sub-block-muted">
+        <div className="sub-head">
+          <ProviderLabel type={sub.type} />
+          <span className="sub-tier">{sub.tier}</span>
+          <StatusDot status={sub.status} />
+        </div>
+        <p className="sub-status-msg">
+          {sub.status === "not_configured" ? "Not configured" :
+           sub.status === "token_expired" ? "Token expired" :
+           sub.status === "timeout" ? "Request timed out" :
+           sub.status}
+        </p>
+        {sub.hint && <code className="sub-hint">{sub.hint}</code>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="sub-block">
+      <div className="sub-head">
+        <ProviderLabel type={sub.type} />
+        <span className="sub-tier">{sub.tier}</span>
+        <StatusDot status="ok" />
+      </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">5h{reset5h ? <> · resets {reset5h}</> : null}</span>
+        <UsageBar utilization={sub.five_hour?.utilization} />
+      </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">7d{reset7d ? <> · resets {reset7d}</> : null}</span>
+        <UsageBar utilization={sub.seven_day?.utilization} />
+      </div>
+    </div>
+  );
+}
+
+function MemberCard({ member, loading }) {
+  const initials = member.name?.charAt(0)?.toUpperCase() ?? "?";
+  const subs = member.subscriptions ?? [];
+
+  return (
+    <div className="member-card">
+      <div className="member-header">
+        <div className="member-avatar">{initials}</div>
+        <div className="member-meta">
+          <span className="member-name">{member.name}</span>
+          <span className="member-role">{member.role}</span>
+        </div>
+      </div>
+
+      {loading && subs.length === 0 ? (
+        <div className="sub-block sub-block-loading"><LoadingDots /></div>
+      ) : subs.length === 0 ? (
+        <div className="sub-block sub-block-muted"><p className="sub-status-msg">No subscriptions configured</p></div>
+      ) : (
+        subs.map((sub, i) =>
+        sub.type === "codex"
+          ? <CodexSubscription key={i} sub={sub} />
+          : <ClaudeSubscription key={i} sub={sub} />
+      )
+      )}
+    </div>
+  );
+}
+
+function OrgApiCard({ api }) {
+  return (
+    <div className="org-api-card">
+      <div className="sub-head">
+        <ProviderLabel type={api.type} />
+        <span className="sub-tier">{api.label}</span>
+        <StatusDot status={api.status} />
+      </div>
+      {api.status !== "ok" && (
+        <p className="sub-status-msg">
+          {api.status === "not_configured" ? "Not configured" : api.status}
+        </p>
+      )}
+    </div>
+  );
+}
 
 export default function ClaudeUsage() {
-  useEffect(() => { document.title = "XC Gradient — Claude Usage"; }, []);
+  useEffect(() => { document.title = "XC Gradient — AI Usage"; }, []);
 
-  const initialData = useMemo(() => peekCache(CLAUDE_USAGE_PATH), []);
+  const initialData = useMemo(() => peekCache(TEAM_USAGE_PATH), []);
   const [data, setData] = useState(initialData);
   const [loading, setLoading] = useState(!initialData);
   const [errorMsg, setErrorMsg] = useState("");
 
   const refresh = useCallback(async ({ forceNetwork = false, silent = false } = {}) => {
-    if (forceNetwork) invalidateCache(CLAUDE_USAGE_PATH);
+    if (forceNetwork) invalidateCache(TEAM_USAGE_PATH);
     if (!silent) setLoading(true);
     setErrorMsg("");
     try {
-      const result = await apiJson(CLAUDE_USAGE_PATH, { timeoutMs: 15000, cacheTtlMs: CLAUDE_USAGE_TTL_MS });
+      const result = await apiJson(TEAM_USAGE_PATH, { timeoutMs: 20000, cacheTtlMs: CACHE_TTL_MS });
       if (result.error) {
         setErrorMsg(result.hint || result.error);
       } else {
@@ -91,31 +241,27 @@ export default function ClaudeUsage() {
 
   useEffect(() => {
     refresh({ silent: Boolean(initialData) });
-    const id = setInterval(() => refresh({ silent: true }), 5 * 60 * 1000);
+    const id = setInterval(() => refresh({ silent: true }), CACHE_TTL_MS);
     return () => clearInterval(id);
   }, [initialData, refresh]);
 
-  const sonnetSub =
-    data?.seven_day_sonnet?.utilization > 0
-      ? `Sonnet ${Math.round(data.seven_day_sonnet.utilization)}% · resets ${timeUntil(data.seven_day_sonnet.resets_at)}`
-      : null;
+  const members = data?.members ?? [];
+  const orgApis = (data?.org_apis ?? []).filter(a => a.status !== "not_configured");
 
   return (
     <>
-      <AppHeader subtitle="Claude Usage" />
+      <AppHeader subtitle="AI Usage" />
 
-      <main className="usage-main">
+      <main className="team-usage-main">
         <div className="usage-head">
           <div>
-            <p className="internal-kicker">Subscription quota</p>
-            <h1 className="usage-title">Claude Usage</h1>
+            <p className="internal-kicker">Monitoring</p>
+            <h1 className="usage-title">AI Usage</h1>
             {data && (
               <p className="usage-meta">
-                <span className="usage-profile">{data.profile}</span>
+                <span>{members.length} members</span>
                 <span className="usage-sep">·</span>
-                <span>{data.subscription_type}</span>
-                <span className="usage-sep">·</span>
-                <span>checked {timeSince(data.last_checked)}</span>
+                <span>checked {timeSince(data.last_refreshed)}</span>
               </p>
             )}
           </div>
@@ -130,22 +276,36 @@ export default function ClaudeUsage() {
           </div>
         )}
 
-        <div className="usage-grid">
-          {loading && !data ? (
-            <>
-              <div className="usage-metric-card is-loading"><LoadingDots /></div>
-              <div className="usage-metric-card is-loading"><LoadingDots /></div>
-            </>
+        <div className="member-grid">
+          {loading && members.length === 0 ? (
+            Array.from({ length: 5 }).map((_, i) => (
+              <div key={i} className="member-card member-card-skeleton">
+                <div className="member-header">
+                  <div className="member-avatar member-avatar-skeleton" />
+                  <div className="member-meta">
+                    <span className="skeleton-line skeleton-line-name" />
+                    <span className="skeleton-line skeleton-line-role" />
+                  </div>
+                </div>
+                <div className="sub-block sub-block-loading"><LoadingDots /></div>
+              </div>
+            ))
           ) : (
-            <>
-              <MetricCard label="5-hour window" window={data?.five_hour} />
-              <MetricCard label="Weekly (7-day)" window={data?.seven_day} sublabel={sonnetSub} />
-            </>
+            members.map(m => <MemberCard key={m.id} member={m} loading={loading} />)
           )}
         </div>
+
+        {orgApis.length > 0 && (
+          <section className="org-apis-section">
+            <h2 className="org-apis-heading">Org APIs</h2>
+            <div className="org-apis-grid">
+              {orgApis.map((api, i) => <OrgApiCard key={i} api={api} />)}
+            </div>
+          </section>
+        )}
       </main>
 
-      <AppFooter left="Internal · XC Gradient · Claude Usage" right="Auto-refreshes every 5 min" />
+      <AppFooter left="Internal · XC Gradient · AI Usage" right="Auto-refreshes every 5 min" />
     </>
   );
 }

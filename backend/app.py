@@ -41,6 +41,8 @@ def create_app() -> FastAPI:
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
+    _INDEX_HEADERS = {"Cache-Control": "no-store"}
+
     @app.get("/")
     @app.get("/task-creator")
     @app.get("/okr-creator")
@@ -48,7 +50,8 @@ def create_app() -> FastAPI:
     @app.get("/claude-usage")
     def serve_index():
         index_path = dist_root / "index.html"
-        return FileResponse(index_path) if index_path.exists() else FileResponse(ROOT / "frontend" / "index.html")
+        src = index_path if index_path.exists() else ROOT / "frontend" / "index.html"
+        return FileResponse(src, headers=_INDEX_HEADERS)
 
     @app.get("/{full_path:path}")
     def serve_frontend(full_path: str):

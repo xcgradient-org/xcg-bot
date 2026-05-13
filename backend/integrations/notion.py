@@ -8,6 +8,8 @@ from typing import Any
 
 from notion_client import Client
 
+from backend.domain.founders import FOUNDER_BY_ID
+
 
 LOGGER = logging.getLogger("xcg_bot.notion")
 DONE_NAMES = {"done", "complete", "completed"}
@@ -338,6 +340,150 @@ class NotionService:
                     return page_id
         return None
 
+    def find_team_member_by_role(self, role: str) -> dict[str, Any] | None:
+        target_role = str(role or "").strip().upper()
+        if not target_role:
+            return None
+        try:
+            rows = self._query_all(self.team_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query team rows; falling back to static founder mapping: %s", exc)
+            for founder in FOUNDER_BY_ID.values():
+                if founder["role"].upper() == target_role:
+                    return {"id": "", "name": founder["name"], "role": founder["role"], "status": "Active"}
+            return None
+
+        matches = [row for row in rows if self._property_text(row, "Role").upper() == target_role]
+        if not matches:
+            for founder in FOUNDER_BY_ID.values():
+                if founder["role"].upper() == target_role:
+                    return {"id": "", "name": founder["name"], "role": founder["role"], "status": "Active"}
+            return None
+
+        def sort_key(row: dict[str, Any]) -> tuple[int, str]:
+            status = self._property_text(row, "Status").strip().lower()
+            return (0 if status in {"active", ""} else 1, self._page_title(row).lower())
+
+        matches.sort(key=sort_key)
+        row = matches[0]
+        return {
+            "id": str(row.get("id") or "").strip(),
+            "name": self._page_title(row) or target_role.title(),
+            "role": self._property_text(row, "Role") or target_role,
+            "status": self._property_text(row, "Status"),
+        }
+
+    def list_team_members(self) -> list[dict[str, Any]]:
+        """Return active-oriented team rows for pickers (names, roles, optional email)."""
+        rows: list[dict[str, Any]] = []
+        try:
+            rows = self._query_all(self.team_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query team rows for listing: %s", exc)
+            return [
+                {"name": founder["name"], "role": founder["role"], "status": "Active", "email": ""}
+                for founder in FOUNDER_BY_ID.values()
+            ]
+
+        members: list[dict[str, Any]] = []
+        for row in rows:
+            name = (self._page_title(row) or "").strip()
+            role = self._property_text(row, "Role").strip()
+            if not name and not role:
+                continue
+            members.append(
+                {
+                    "name": name or role,
+                    "role": role,
+                    "status": self._property_text(row, "Status").strip(),
+                    "email": self._property_text(row, "Email").strip(),
+                }
+            )
+        members.sort(key=lambda item: (item["name"] or item["role"]).lower())
+        return members
+
+    def find_team_member(self, query: str) -> dict[str, Any] | None:
+        """Resolve a team member by role title, full name, email, or unique partial name.
+
+        Raises ValueError when the query matches more than one person and cannot be disambiguated.
+        """
+        raw = str(query or "").strip()
+        if not raw:
+            return None
+
+        key = raw.lower()
+
+        rows: list[dict[str, Any]] = []
+        try:
+            rows = self._query_all(self.team_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query team rows for member lookup: %s", exc)
+            return self.find_team_member_by_role(raw)
+
+        def row_member(row: dict[str, Any]) -> dict[str, Any]:
+            name = (self._page_title(row) or "").strip()
+            return {
+                "id": str(row.get("id") or "").strip(),
+                "name": name,
+                "role": self._property_text(row, "Role").strip(),
+                "status": self._property_text(row, "Status").strip(),
+                "email": self._property_text(row, "Email").strip(),
+                "founder_alias": self._property_text(row, "Founder").strip(),
+            }
+
+        members = [row_member(r) for r in rows if r]
+
+        if not members:
+            return self.find_team_member_by_role(raw)
+
+        def active_sort_key(member: dict[str, Any]) -> tuple[int, str]:
+            status = member["status"].lower()
+            return (0 if status in {"active", ""} else 1, (member["name"] or member["role"]).lower())
+
+        name_hits = [m for m in members if m["name"].lower() == key]
+        if len(name_hits) > 1:
+            raise ValueError("Ambiguous name match in the Team database (duplicate titles).")
+        if len(name_hits) == 1:
+            return {k: v for k, v in name_hits[0].items() if k != "founder_alias"}
+
+        email_hits = [m for m in members if m["email"] and m["email"].lower() == key]
+        if len(email_hits) > 1:
+            raise ValueError("Ambiguous email match in the Team database.")
+        if len(email_hits) == 1:
+            return {k: v for k, v in email_hits[0].items() if k != "founder_alias"}
+
+        alias_hits = [
+            m
+            for m in members
+            if m["founder_alias"] and m["founder_alias"].lower() == key
+        ]
+        if len(alias_hits) > 1:
+            raise ValueError("Ambiguous founder alias match in the Team database.")
+        if len(alias_hits) == 1:
+            return {k: v for k, v in alias_hits[0].items() if k != "founder_alias"}
+
+        role_hits = [m for m in members if m["role"] and m["role"].lower() == key]
+        if role_hits:
+            role_hits.sort(key=active_sort_key)
+            active_only = [m for m in role_hits if m["status"].lower() in {"active", ""}]
+            pool = active_only or role_hits
+            if len(pool) > 1:
+                labels = ", ".join(f'{m["name"]} ({m["role"]})' for m in pool[:12])
+                raise ValueError(
+                    f"Multiple team members share role {raw!r}; use a full name or email. Matches: {labels}"
+                )
+            return {k: v for k, v in pool[0].items() if k != "founder_alias"}
+
+        if len(key) >= 2:
+            substrings = [m for m in members if key in (m["name"] or "").lower()]
+            if len(substrings) > 1:
+                labels = ", ".join(m["name"] for m in substrings[:12])
+                raise ValueError(f"Person query {raw!r} is ambiguous; matches: {labels}")
+            if len(substrings) == 1:
+                return {k: v for k, v in substrings[0].items() if k != "founder_alias"}
+
+        return self.find_team_member_by_role(raw)
+
     def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
         db_schema = self._retrieve_schema(self.tasks_db_id)
         properties = self._task_completion_properties(task, db_schema, completed=completed, today_iso=today_iso)
@@ -512,7 +658,6 @@ class NotionService:
 
             query_fn = data_source_query
             query_kwargs_name = "data_source_id"
-            database_id = self.primary_data_source_id(database_id)
 
         while True:
             payload: dict[str, Any] = {"page_size": 100}
@@ -1047,6 +1192,36 @@ class NotionService:
 
     def _task_matches_week(self, task: dict[str, Any], week_code: str) -> bool:
         return self._week_matches(self._task_week_value(task), week_code)
+
+    def query_week_tasks(
+        self,
+        role: str,
+        week_code: str,
+        founder_name: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        try:
+            tasks = self._query_all(self.tasks_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query week tasks; generating an empty report instead: %s", exc)
+            return [], [], []
+
+        matched = [
+            task
+            for task in tasks
+            if self._task_matches_founder(task, role=role, founder_name=founder_name)
+            and self._task_matches_week(task, week_code)
+            and not self._is_task_archived(task)
+        ]
+        matched.sort(
+            key=lambda task: (
+                not self._is_task_done(task),
+                self.task_display_id(task).lower(),
+                self.task_description(task).lower(),
+            )
+        )
+        done = [task for task in matched if self._is_task_done(task)]
+        pending = [task for task in matched if not self._is_task_done(task)]
+        return matched, done, pending
 
     def _founder_matches_row(self, row: dict[str, Any], founder_name: str) -> bool:
         # Check "Founder" alias first; fall back to page title for Team rows (title property is "Name")

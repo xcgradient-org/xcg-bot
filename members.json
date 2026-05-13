@@ -1,0 +1,48 @@
+{
+  "members": [
+    {
+      "id": "oriol",
+      "name": "Oriol",
+      "email": "ceo@xcgradient.com",
+      "role": "ceo",
+      "profile_dir": "~/.claude",
+      "subscriptions": [
+        {"type": "claude_oauth", "tier": "team_standard"},
+        {"type": "codex", "tier": "chatgpt_pro", "db_path": "~/.codex/logs_2.sqlite", "auth_path": "~/.codex/auth.json"}
+      ]
+    },
+    {
+      "id": "adam",
+      "name": "Adam",
+      "email": "coo@xcgradient.com",
+      "role": "coo",
+      "profile_dir": "~/.claude-adam",
+      "subscriptions": [{"type": "claude_oauth", "tier": "team_standard"}]
+    },
+    {
+      "id": "arnau",
+      "name": "Arnau",
+      "email": "cto@xcgradient.com",
+      "role": "cto",
+      "profile_dir": "~/.claude-arnau",
+      "subscriptions": [{"type": "claude_oauth", "tier": "team_standard"}]
+    },
+    {
+      "id": "laia",
+      "name": "Laia",
+      "email": "laianoguer@xcgradient.com",
+      "role": "user",
+      "profile_dir": "~/.claude-laia",
+      "subscriptions": [{"type": "claude_oauth", "tier": "team_standard"}]
+    },
+    {
+      "id": "pol",
+      "name": "Pol",
+      "email": "polcasanovas@xcgradient.com",
+      "role": "user",
+      "profile_dir": "~/.claude-pol",
+      "subscriptions": [{"type": "claude_oauth", "tier": "team_standard"}]
+    }
+  ],
+  "org_apis": []
+}

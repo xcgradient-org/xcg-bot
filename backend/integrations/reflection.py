@@ -36,6 +36,11 @@ MODEL_PRIORITY_BY_KEY: dict[int, list[str]] = {
         "openai/gpt-oss-20b",
     ],
 }
+JSON_MODEL_PRIORITY = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b",
+]
 DEFAULT_MODEL = MODEL_PRIORITY_BY_KEY[0][0]
 SYSTEM_PROMPT = (
     "You are an EOD writing assistant for a B2B SaaS startup. "
@@ -146,6 +151,10 @@ class ReflectionService:
             "temperature": 0.2,
             "max_tokens": max_output_tokens,
         }
+        if response_mime_type == "application/json":
+            payload["response_format"] = {"type": "json_object"}
+            if self._supports_include_reasoning(model):
+                payload["include_reasoning"] = False
         return self._request_json_with_key("/chat/completions", method="POST", payload=payload, api_key=api_key)
 
     def _model_request(
@@ -158,6 +167,35 @@ class ReflectionService:
     ) -> dict:
         keys = self.api_keys or ("",)
         errors: list[str] = []
+        if response_mime_type == "application/json":
+            invalid_key_indexes: set[int] = set()
+            for model in JSON_MODEL_PRIORITY:
+                for key_idx, key in enumerate(keys):
+                    if key_idx in invalid_key_indexes:
+                        continue
+                    try:
+                        result = self._openai_request(
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                            model=model,
+                            api_key=key,
+                            response_mime_type=response_mime_type,
+                            max_output_tokens=max_output_tokens,
+                        )
+                        if key_idx > 0 or model != JSON_MODEL_PRIORITY[0]:
+                            LOGGER.info("LLM succeeded with key #%s model=%s.", key_idx + 1, model)
+                        return result
+                    except Exception as exc:  # noqa: BLE001
+                        errors.append(f"key #{key_idx + 1} {model}: {exc}")
+                        if self._is_invalid_api_key_error(exc):
+                            invalid_key_indexes.add(key_idx)
+                            LOGGER.warning("LLM key #%s is invalid; skipping this key for JSON synthesis.", key_idx + 1)
+                            continue
+                        if self._is_json_validation_error(exc):
+                            raise RuntimeError(f"Non-retriable JSON validation failure with key #{key_idx + 1}: {exc}") from exc
+                        LOGGER.warning("LLM failed with key #%s model=%s: %s", key_idx + 1, model, exc)
+            raise RuntimeError("All configured LLM key/model combinations failed: " + " | ".join(errors))
+
         for key_idx, key in enumerate(keys):
             models = MODEL_PRIORITY_BY_KEY.get(key_idx, [self.model])
             for model in models:
@@ -175,15 +213,64 @@ class ReflectionService:
                     return result
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"key #{key_idx + 1} {model}: {exc}")
+                    if self._is_invalid_api_key_error(exc):
+                        LOGGER.warning("LLM key #%s is invalid; skipping remaining models for this key.", key_idx + 1)
+                        break
                     LOGGER.warning("LLM failed with key #%s model=%s: %s", key_idx + 1, model, exc)
         raise RuntimeError("All configured LLM key/model combinations failed: " + " | ".join(errors))
+
+    @staticmethod
+    def _is_invalid_api_key_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "invalid_api_key" in text or "invalid api key" in text
+
+    @staticmethod
+    def _is_json_validation_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "json_validate_failed" in text or "failed to validate json" in text
+
+    @staticmethod
+    def _supports_include_reasoning(model: str) -> bool:
+        normalized = model.strip().lower()
+        return normalized.startswith("openai/gpt-oss") or normalized.startswith("qwen/qwen3")
+
+    @staticmethod
+    def _coerce_content(content: object) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        chunks.append(text)
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                for key in ("text", "content", "value", "output_text"):
+                    value = item.get(key)
+                    if isinstance(value, str):
+                        text = value.strip()
+                        if text:
+                            chunks.append(text)
+                            break
+                    if isinstance(value, dict):
+                        nested = value.get("value") if isinstance(value.get("value"), str) else value.get("text")
+                        if isinstance(nested, str) and nested.strip():
+                            chunks.append(nested.strip())
+                            break
+            return "\n".join(chunks).strip()
+        return ""
 
     def _extract_text(self, payload: dict) -> str:
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             message = choices[0].get("message", {})
             if isinstance(message, dict):
-                return str(message.get("content", "")).strip()
+                extracted = self._coerce_content(message.get("content"))
+                if extracted:
+                    return extracted
         if "response" in payload:
             return str(payload.get("response", "")).strip()
         return ""
