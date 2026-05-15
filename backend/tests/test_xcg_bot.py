@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import tempfile
 import unittest
@@ -18,10 +19,15 @@ from backend import config as main
 from backend.integrations import notion, reflection
 from backend.services.daily_log_dedupe import DailyLogDedupeService
 from backend.services import internal_tools as internal_server
+from backend.services.meetings import MeetingsService
 from backend.services import runtime as runtime_service
+from backend.services.tasks import TasksService
 from backend.services import streaks
+from backend.services.team_usage.providers.claude_oauth import ClaudeOAuthProvider
+from backend.services.week import WeekService
 from backend.services.logs import LogsService
-from bot.commands import log_command, meeting_command, meetings, task_command
+from backend.domain import blockers
+from bot.commands import meetings
 
 
 class LoadSettingsTests(unittest.TestCase):
@@ -521,7 +527,7 @@ class WebLoggingTests(unittest.TestCase):
             None,
         ]
 
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
+        with patch("backend.services.logs.current_context", return_value=blockers.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             payload = service.logging_status()
 
         self.assertEqual(payload["today_iso"], "2026-05-12")
@@ -567,7 +573,7 @@ class WebLoggingTests(unittest.TestCase):
         reflection_service.generate_reflection.return_value = "Manual log"
 
         fake_now = streaks.MADRID_TZ.localize(dt.datetime(2026, 5, 12, 21, 3, 0))
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
+        with patch("backend.services.logs.current_context", return_value=blockers.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             with patch("backend.services.logs.datetime") as mocked_datetime:
                 mocked_datetime.now.return_value = fake_now
                 mocked_datetime.fromisoformat.side_effect = dt.datetime.fromisoformat
@@ -598,7 +604,7 @@ class WebLoggingTests(unittest.TestCase):
         notion_service.find_daily_log.return_value = None
         notion_service.query_log_tasks.return_value = ([], [], "26-W20")
 
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
+        with patch("backend.services.logs.current_context", return_value=blockers.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             payload = service.log_now({"founder": "oriol"})
 
         notion_service.create_daily_log.assert_not_called()
@@ -607,35 +613,14 @@ class WebLoggingTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "no_completed_tasks")
 
 
-class LogCommandTests(unittest.TestCase):
-    def test_rewrite_blocker_message_uses_llm_response(self) -> None:
-        state = MagicMock()
-        state.founder = {"name": "Oriol", "role": "CEO"}
-        state.notion.task_descriptions.return_value = ["API integration"]
-        state.reflection.generate_json_response.return_value = {
-            "message": "I need the final schema confirmation to finish the API integration today."
-        }
-
-        message = log_command._rewrite_blocker_message(
-            state,
-            [],
-            target_role="CTO",
-            raw_notes="Blocked on schema details.",
-            raw_blocker="Need schema help from CTO.",
-        )
-
-        self.assertEqual(
-            message,
-            "I need the final schema confirmation to finish the API integration today.",
-        )
-
+class BlockersTests(unittest.TestCase):
     def test_build_blocker_message_mentions_configured_user(self) -> None:
         settings = MagicMock()
         settings.discord_user_id_oriol = 111
         settings.discord_user_id_arnau = 222
         settings.discord_user_id_adam = 333
 
-        message = log_command.build_blocker_message(
+        message = blockers.build_blocker_message(
             "Oriol",
             "CTO",
             "I need the final schema to finish the API integration.",
@@ -651,7 +636,7 @@ class LogCommandTests(unittest.TestCase):
         settings.discord_user_id_arnau = 222
         settings.discord_user_id_adam = 333
 
-        message = log_command.build_blocker_message(
+        message = blockers.build_blocker_message(
             "Oriol",
             "CTO",
             "I need the final schema to finish the API integration.",
@@ -663,134 +648,12 @@ class LogCommandTests(unittest.TestCase):
         self.assertIn("<@222>", message)
 
     def test_current_context_uses_previous_day_before_5am_madrid(self) -> None:
-        now = log_command.MADRID_TZ.localize(dt.datetime(2026, 4, 13, 1, 30))
+        now = blockers.MADRID_TZ.localize(dt.datetime(2026, 4, 13, 1, 30))
 
-        ctx = log_command.current_context(now)
+        ctx = blockers.current_context(now)
 
         self.assertEqual(ctx.today_iso, "2026-04-12")
         self.assertEqual(ctx.week_code, "26-W15")
-
-
-class LogCommandAsyncTests(unittest.IsolatedAsyncioTestCase):
-    async def test_finalize_log_runs_sync_work_via_to_thread(self) -> None:
-        state = MagicMock()
-        state.founder = {"name": "Oriol", "role": "CEO"}
-        state.ctx = log_command.LogContext("2026-05-04", "26-W19", "2026-05-04")
-        state.settings = MagicMock(discord_blockers_channel_id=123)
-        state.bot = MagicMock()
-        interaction = MagicMock()
-        interaction.followup.send = AsyncMock()
-        interaction.channel = None
-
-        with patch("bot.commands.log_command.asyncio.to_thread", new=AsyncMock(return_value=(3, []))) as to_thread:
-            await log_command._finalize_log(
-                interaction,
-                state,
-                task_pages=[],
-                raw_notes="",
-                blocker=None,
-            )
-
-        to_thread.assert_awaited_once_with(log_command._complete_log_sync, state, [], "")
-        interaction.followup.send.assert_awaited_once()
-
-    async def test_finalize_log_succeeds_when_streak_refresh_is_unavailable(self) -> None:
-        state = MagicMock()
-        state.founder = {"name": "Oriol", "role": "CEO"}
-        state.ctx = log_command.LogContext("2026-05-04", "26-W19", "2026-05-04")
-        state.settings = MagicMock(discord_blockers_channel_id=123)
-        state.bot = MagicMock()
-        interaction = MagicMock()
-        interaction.followup.send = AsyncMock()
-        interaction.channel = MagicMock()
-        interaction.channel.send = AsyncMock()
-
-        with patch("bot.commands.log_command.asyncio.to_thread", new=AsyncMock(return_value=(None, None))):
-            await log_command._finalize_log(
-                interaction,
-                state,
-                task_pages=[],
-                raw_notes="",
-                blocker=None,
-            )
-
-        interaction.followup.send.assert_awaited_once()
-        message = interaction.followup.send.await_args.args[0]
-        self.assertIn("Log saved.", message)
-        self.assertIn("Remaining this week: unavailable.", message)
-        self.assertIn("Streak refresh is temporarily unavailable.", message)
-        interaction.channel.send.assert_awaited_once_with("✅ Oriol logged")
-
-
-class MeetingCommandTests(unittest.TestCase):
-    def test_normalize_attendees_splits_slashes_and_commas(self) -> None:
-        attendees = meeting_command._normalize_attendees("CEO / CTO, COO")
-        self.assertEqual(attendees, ["CEO", "CTO", "COO"])
-
-    def test_attendee_choice_all_maps_to_all_founders(self) -> None:
-        self.assertEqual(meeting_command.ATTENDEE_CHOICES[0].value, "CEO, CTO, COO")
-
-    def test_try_parse_user_datetime_uses_strict_madrid_format(self) -> None:
-        date_iso = meeting_command._try_parse_user_datetime("2026-04-17 11:00", default_year=2026)
-        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
-
-    def test_try_parse_user_datetime_accepts_month_day_without_year(self) -> None:
-        date_iso = meeting_command._try_parse_user_datetime("04-17 11:00", default_year=2026)
-        self.assertEqual(date_iso, "2026-04-17T11:00:00+02:00")
-
-    def test_try_parse_user_datetime_handles_this_friday_relative_to_today(self) -> None:
-        base_now = meeting_command.MADRID_TZ.localize(dt.datetime(2026, 4, 12, 16, 0))
-        date_iso = meeting_command._try_parse_user_datetime("this friday", default_year=2026, base_now=base_now)
-        self.assertEqual(date_iso, "2026-04-17T10:00:00+02:00")
-
-    def test_normalize_payload_uses_ai_date_when_present(self) -> None:
-        raw_input = {
-            "title": "Weekly Sync",
-            "date_input": "Friday 17 April at 11",
-            "type": "Weekly Sync",
-            "attendees": "CEO, CTO, COO",
-            "location": "Meet room",
-            "notes": "Discuss blockers",
-        }
-        ai_payload = {
-            "title": "Weekly Sync",
-            "date_iso": "2026-04-17T11:00:00+02:00",
-            "attendees": ["CEO", "CTO", "COO"],
-            "notes_enhanced": "Discuss blockers clearly.",
-        }
-        payload = meeting_command._normalize_payload(raw_input, ai_payload)
-        self.assertEqual(payload["date_iso"], "2026-04-17T11:00:00+02:00")
-        self.assertEqual(payload["notes_enhanced"], "Discuss blockers clearly.")
-
-    def test_normalize_payload_falls_back_to_raw_input(self) -> None:
-        raw_input = {
-            "title": "Weekly Sync",
-            "date_input": "2026-04-14 10:00",
-            "date_iso": "2026-04-14T10:00:00+02:00",
-            "type": "Weekly Sync",
-            "attendees": "CEO, CTO, COO",
-            "location": "Meet room",
-            "notes": "Discuss blockers",
-        }
-        payload = meeting_command._normalize_payload(raw_input, None)
-        self.assertEqual(payload["title"], "Weekly Sync")
-        self.assertEqual(payload["attendees"], ["CEO", "CTO", "COO"])
-        self.assertEqual(payload["location"], "Meet room")
-        self.assertEqual(payload["notes_enhanced"], "Discuss blockers")
-
-    def test_build_confirmation_omits_notes_when_empty(self) -> None:
-        payload = {
-            "title": "Client Call",
-            "date_iso": "2026-04-14T10:00:00+02:00",
-            "type": "Client",
-            "attendees": ["CEO", "COO"],
-            "location": "Zoom",
-            "notes_enhanced": "",
-        }
-        message = meeting_command._build_confirmation(payload)
-        self.assertIn("Client — Tuesday 14 April, 10:00", message)
-        self.assertNotIn("📝", message)
-        self.assertIn("Posted in #announcements.", message)
 
 
 class InternalMeetingCreatorTests(unittest.TestCase):
@@ -808,7 +671,7 @@ class InternalMeetingCreatorTests(unittest.TestCase):
         app.meeting_task_project_name = "ALPHA"
         app.notion = MagicMock()
         app.notion.list_projects.return_value = [{"id": "project-alpha", "name": "ALPHA"}]
-        app.notion.get_current_week_from_settings.return_value = "26-W20"
+        app.notion.resolve_current_week.return_value = "26-W20"
         app.notion._week_matches.side_effect = lambda left, right: left == right
 
         create_calls: list[dict[str, object]] = []
@@ -840,168 +703,49 @@ class InternalMeetingCreatorTests(unittest.TestCase):
         self.assertEqual({call["is_current_week"] for call in create_calls}, {True})
 
 
-class TaskCommandTests(unittest.TestCase):
-    def test_normalize_task_descriptions_deduplicates_and_cleans(self) -> None:
-        payload = {
-            "tasks": [
-                {"description": "  Draft investor update  "},
-                {"description": "Draft investor update"},
-                {"description": "Prepare demo script"},
-            ]
-        }
-
-        descriptions = task_command._normalize_task_descriptions(payload)
-
-        self.assertEqual(descriptions, ["Draft investor update", "Prepare demo script"])
-
-    def test_fallback_task_descriptions_splits_two_task_request(self) -> None:
-        descriptions = task_command._fallback_task_descriptions("add 2 tasks: draft investor update and prepare demo script")
-
-        self.assertEqual(descriptions, ["draft investor update", "prepare demo script"])
-
-    def test_fallback_task_descriptions_keeps_single_feature_request_with_metric_list_together(self) -> None:
-        descriptions = task_command._fallback_task_descriptions(
-            "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput"
-        )
-
-        self.assertEqual(
-            descriptions,
-            [
-                "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput"
-            ],
-        )
-
-    def test_parse_task_descriptions_uses_fallback_when_llm_returns_invalid_payload(self) -> None:
-        reflection_service = MagicMock()
-        reflection_service.generate_json_response.return_value = {"unexpected": []}
-
-        descriptions = task_command._parse_task_descriptions(
-            reflection_service,
-            "add 2 tasks: draft investor update and prepare demo script",
-        )
-
-        self.assertEqual(descriptions, ["Draft investor update.", "Prepare demo script."])
-
-    def test_parse_task_descriptions_limits_over_split_llm_output_without_explicit_multi_task_request(self) -> None:
-        reflection_service = MagicMock()
-        reflection_service.generate_json_response.return_value = {
-            "tasks": [
-                {"description": "Build local AI CLI"},
-                {"description": "Show occupied VRAM"},
-                {"description": "Show available context window"},
-                {"description": "Show TTFT"},
-                {"description": "Show TTLT"},
-                {"description": "Show throughput"},
-            ]
-        }
-
-        descriptions = task_command._parse_task_descriptions(
-            reflection_service,
-            "add a local ai cli which allows you to see the occupied VRAM of a model and the context window available as well as TTFT, TTLT and throughput",
-        )
-
-        self.assertEqual(
-            descriptions,
-            [
-                "Build local AI CLI.",
-                "Show occupied VRAM.",
-                "Show available context window.",
-                "Show TTFT.",
-            ],
-        )
-
-    def test_parse_task_descriptions_contextualizes_short_followup_fragments(self) -> None:
-        reflection_service = MagicMock()
-        reflection_service.generate_json_response.return_value = {
-            "tasks": [
-                {"description": "set up the joint revolut bank account (group pocket)"},
-                {"description": "add adam"},
-                {"description": "add arnau"},
-            ]
-        }
-
-        descriptions = task_command._parse_task_descriptions(
-            reflection_service,
-            "set up the joint Revolut bank account (group pocket) and add Adam and add Arnau",
-        )
-
-        self.assertEqual(
-            descriptions,
-            [
-                "Set up the joint Revolut bank account (group pocket).",
-                "Add Adam to the joint Revolut bank account (group pocket).",
-                "Add Arnau to the joint Revolut bank account (group pocket).",
-            ],
-        )
-
-    def test_task_creation_week_code_uses_current_week_before_friday_cutoff(self) -> None:
-        before_cutoff = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 1, 16, 55))
-        self.assertEqual(task_command._task_creation_week_code(before_cutoff), "26-W18")
-
-    def test_task_creation_week_code_uses_current_week_at_friday_cutoff(self) -> None:
-        at_cutoff = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 1, 17, 0))
-        self.assertEqual(task_command._task_creation_week_code(at_cutoff), "26-W18")
-
-    def test_task_creation_week_code_uses_current_week_on_sunday(self) -> None:
-        sunday = log_command.MADRID_TZ.localize(dt.datetime(2026, 5, 3, 12, 0))
-        self.assertEqual(task_command._task_creation_week_code(sunday), "26-W18")
-
-    def test_choose_project_only_updates_state_after_preview_succeeds(self) -> None:
+class InternalWeekServiceTests(unittest.TestCase):
+    def test_run_weekly_rollover_uses_resolved_current_week(self) -> None:
         notion_service = MagicMock()
-        notion_service.preview_task_ids.side_effect = RuntimeError("preview failed")
-        state = task_command._TaskAddState(
-            notion=notion_service,
-            founder={"name": "Oriol", "role": "CEO"},
-            raw_text="draft investor update",
-            descriptions=["Draft investor update"],
-            projects=[{"id": "proj-1", "name": "ALPHA"}],
-            year=2026,
-            quarter_name="Q2 2026",
-            month_name="May",
-            week_code="26-W18",
-            today_iso="2026-05-03",
-        )
+        notion_service.resolve_current_week.return_value = "26-W20"
+        notion_service.get_next_week_code.return_value = "26-W21"
+        notion_service.find_incomplete_tasks_for_week.return_value = [{"id": "task-1", "properties": {}}]
+        notion_service.task_display_id.return_value = "ALPHA-CEO-1"
+        notion_service._property_text.return_value = "Finish report"
+        runtime = MagicMock(notion=notion_service)
 
-        with self.assertRaisesRegex(RuntimeError, "preview failed"):
-            state.choose_project("proj-1")
+        result = WeekService(runtime).run_weekly_rollover({"current_week": "26-W20"})
 
-        self.assertEqual(state.selected_project_id, "")
-        self.assertEqual(state.selected_project_name, "")
-        self.assertEqual(state.preview_ids, [])
+        notion_service.resolve_current_week.assert_called_once_with()
+        notion_service.find_incomplete_tasks_for_week.assert_called_once_with("26-W20")
+        notion_service.rollover_tasks_batch.assert_called_once()
+        notion_service.set_is_current_week_flags.assert_called_once_with("26-W20", "26-W21")
+        notion_service.set_current_week_in_settings.assert_called_once_with("26-W21", status="success", count=1)
+        self.assertEqual(result["from_week"], "26-W20")
+        self.assertEqual(result["to_week"], "26-W21")
 
-    def test_project_select_defers_before_editing_original_response(self) -> None:
+
+class InternalTaskServiceTests(unittest.TestCase):
+    def test_create_tasks_marks_current_week_from_resolved_week(self) -> None:
         notion_service = MagicMock()
-        notion_service.preview_task_ids.return_value = ["ALPHA-CEO-1"]
-        state = task_command._TaskAddState(
-            notion=notion_service,
-            founder={"name": "Oriol", "role": "CEO"},
-            raw_text="draft investor update",
-            descriptions=["Draft investor update"],
-            projects=[{"id": "proj-1", "name": "ALPHA"}],
-            year=2026,
-            quarter_name="Q2 2026",
-            month_name="May",
-            week_code="26-W18",
-            today_iso="2026-05-03",
+        notion_service.resolve_current_week.return_value = "26-W21"
+        notion_service._week_matches.side_effect = lambda left, right: left == right
+        notion_service.create_tasks_batch.return_value = [{"id": "task-1"}]
+        runtime = MagicMock(notion=notion_service)
+
+        result = TasksService(runtime).create_tasks(
+            {
+                "founder": "oriol",
+                "project_id": "project-alpha",
+                "project_name": "ALPHA",
+                "week_code": "26-W21",
+                "descriptions": ["Finish report"],
+            }
         )
-        select = task_command._ProjectSelect(state, state.projects, 0)
-        select._values = ["proj-1"]
 
-        interaction = MagicMock()
-        interaction.response.defer = AsyncMock()
-        interaction.edit_original_response = AsyncMock()
-
-        import asyncio
-
-        asyncio.run(select.callback(interaction))
-
-        interaction.response.defer.assert_awaited_once_with()
-        interaction.edit_original_response.assert_awaited_once()
-        self.assertIn("Project: **ALPHA**", interaction.edit_original_response.await_args.kwargs["content"])
-        self.assertIsInstance(
-            interaction.edit_original_response.await_args.kwargs["view"],
-            task_command._TaskProjectPickerView,
-        )
+        notion_service.resolve_current_week.assert_called_once_with()
+        create_call = notion_service.create_tasks_batch.call_args.kwargs
+        self.assertTrue(create_call["is_current_week"])
+        self.assertEqual(result["created"], 1)
 
 
 class NotionTaskCreationTests(unittest.TestCase):
@@ -1285,13 +1029,112 @@ class NotionServiceTests(unittest.TestCase):
         # End of year 2026 (W53 is the last week of 2026)
         self.assertEqual(service.get_next_week_code("26-W53"), "27-W01")
 
-    def test_get_current_week_defaults_to_calendar_week_when_settings_db_is_absent(self) -> None:
+    def test_get_current_week_from_settings_raises_when_settings_db_is_absent(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
-        fake_now = dt.datetime(2026, 5, 12, 9, 0, 0)
+        with self.assertRaisesRegex(RuntimeError, "No settings database configured"):
+            service.get_current_week_from_settings()
 
-        with patch("backend.integrations.notion.datetime") as mocked_datetime:
-            mocked_datetime.now.return_value = fake_now
-            self.assertEqual(service.get_current_week_from_settings(), "26-W20")
+    def test_resolve_current_week_prefers_settings_db_over_task_flags(self) -> None:
+        service = notion.NotionService(
+            token="token",
+            tasks_db_id="tasks",
+            daily_logs_db_id="daily",
+            team_db_id="team",
+            settings_db_id="settings",
+        )
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "26-W21"}},
+                    "Is Current Week": {"type": "checkbox", "checkbox": True},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            }
+        ]
+
+        with patch.object(service, "_query_all", side_effect=[[{"properties": {"Current Week": {"type": "rich_text", "rich_text": [{"plain_text": "26-W20"}]}}}], tasks]):
+            self.assertEqual(service.resolve_current_week(), "26-W20")
+
+    def test_resolve_current_week_uses_task_flags_when_settings_db_is_absent(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "26-W21"}},
+                    "Is Current Week": {"type": "checkbox", "checkbox": True},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            }
+        ]
+
+        with patch.object(service, "_query_all", return_value=tasks):
+            self.assertEqual(service.resolve_current_week(), "26-W21")
+
+    def test_resolve_current_week_falls_back_to_task_flags_when_settings_lookup_fails(self) -> None:
+        service = notion.NotionService(
+            token="token",
+            tasks_db_id="tasks",
+            daily_logs_db_id="daily",
+            team_db_id="team",
+            settings_db_id="settings",
+        )
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "2026-W21"}},
+                    "Is Current Week": {"type": "checkbox", "checkbox": True},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            }
+        ]
+
+        with patch.object(service, "_query_all", side_effect=[RuntimeError("settings offline"), tasks]):
+            self.assertEqual(service.resolve_current_week(), "26-W21")
+
+    def test_resolve_current_week_warns_and_uses_latest_flagged_week(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "26-W20"}},
+                    "Is Current Week": {"type": "checkbox", "checkbox": True},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            },
+            {
+                "id": "task-2",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "26-W21"}},
+                    "Is Current Week": {"type": "checkbox", "checkbox": True},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            },
+        ]
+
+        with patch.object(service, "_query_all", return_value=tasks):
+            with self.assertLogs("xcg_bot.notion", level="WARNING") as logs:
+                self.assertEqual(service.resolve_current_week(), "26-W21")
+        self.assertTrue(any("Multiple task weeks are flagged as current week" in entry for entry in logs.output))
+
+    def test_resolve_current_week_raises_when_no_settings_or_task_flags_exist(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
+        tasks = [
+            {
+                "id": "task-1",
+                "properties": {
+                    "Week": {"type": "select", "select": {"name": "26-W21"}},
+                    "Status": {"type": "select", "select": {"name": "Todo"}},
+                },
+            }
+        ]
+
+        with patch.object(service, "_query_all", return_value=tasks):
+            with self.assertRaisesRegex(RuntimeError, "Unable to resolve current week from task flags"):
+                service.resolve_current_week()
 
     def test_set_current_week_in_settings_noops_when_settings_db_is_absent(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
@@ -1818,6 +1661,118 @@ class DailyLogDedupeTests(unittest.TestCase):
                 "week_code": week_code,
             },
         }
+
+
+class ClaudeOAuthProviderTests(unittest.TestCase):
+    def _write_credentials(
+        self,
+        profile_dir: Path,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_at_ms: int,
+        subscription_type: str = "team",
+    ) -> Path:
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        creds_path = profile_dir / ".credentials.json"
+        creds_path.write_text(
+            json.dumps(
+                {
+                    "claudeAiOauth": {
+                        "accessToken": access_token,
+                        "refreshToken": refresh_token,
+                        "expiresAt": expires_at_ms,
+                        "subscriptionType": subscription_type,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        return creds_path
+
+    def test_expired_token_refreshes_and_persists_credentials(self) -> None:
+        provider = ClaudeOAuthProvider()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir)
+            creds_path = self._write_credentials(
+                profile_dir,
+                access_token="expired-access",
+                refresh_token="refresh-1",
+                expires_at_ms=1,
+            )
+            refresh_response = MagicMock(is_success=True)
+            refresh_response.json.return_value = {
+                "access_token": "fresh-access",
+                "refresh_token": "fresh-refresh",
+                "expires_in": 3600,
+            }
+            usage_response = MagicMock(status_code=200, is_success=True)
+            usage_response.json.return_value = {
+                "five_hour": {"utilization": 42},
+                "seven_day": {"utilization": 55},
+                "seven_day_sonnet": {"utilization": 60},
+            }
+
+            with patch("backend.services.team_usage.providers.claude_oauth.httpx.post", return_value=refresh_response) as http_post:
+                with patch("backend.services.team_usage.providers.claude_oauth.httpx.get", return_value=usage_response) as http_get:
+                    payload = provider.get_usage({"type": "claude_oauth", "tier": "team_standard"}, profile_dir)
+                    saved = json.loads(creds_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["tier"], "team")
+        self.assertEqual(http_post.call_count, 1)
+        self.assertEqual(http_get.call_count, 1)
+        auth_header = http_get.call_args.kwargs["headers"]["Authorization"]
+        self.assertEqual(auth_header, "Bearer fresh-access")
+        self.assertEqual(saved["claudeAiOauth"]["accessToken"], "fresh-access")
+        self.assertEqual(saved["claudeAiOauth"]["refreshToken"], "fresh-refresh")
+        self.assertGreater(saved["claudeAiOauth"]["expiresAt"], 1)
+
+    def test_unauthorized_usage_refreshes_and_retries(self) -> None:
+        provider = ClaudeOAuthProvider()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir)
+            self._write_credentials(
+                profile_dir,
+                access_token="stale-access",
+                refresh_token="refresh-2",
+                expires_at_ms=9_999_999_999_999,
+            )
+            unauthorized = MagicMock(status_code=401, is_success=False, text="unauthorized")
+            usage_ok = MagicMock(status_code=200, is_success=True)
+            usage_ok.json.return_value = {"five_hour": {"utilization": 10}, "seven_day": {"utilization": 20}}
+            refresh_response = MagicMock(is_success=True)
+            refresh_response.json.return_value = {"access_token": "fresh-2", "expires_in": 3600}
+
+            with patch(
+                "backend.services.team_usage.providers.claude_oauth.httpx.get",
+                side_effect=[unauthorized, usage_ok],
+            ) as http_get:
+                with patch("backend.services.team_usage.providers.claude_oauth.httpx.post", return_value=refresh_response) as http_post:
+                    payload = provider.get_usage({"type": "claude_oauth", "tier": "team_standard"}, profile_dir)
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(http_post.call_count, 1)
+        self.assertEqual(http_get.call_count, 2)
+        self.assertEqual(http_get.call_args_list[1].kwargs["headers"]["Authorization"], "Bearer fresh-2")
+
+    def test_expired_token_with_failed_refresh_returns_token_expired(self) -> None:
+        provider = ClaudeOAuthProvider()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            profile_dir = Path(tmpdir)
+            self._write_credentials(
+                profile_dir,
+                access_token="expired-access",
+                refresh_token="refresh-3",
+                expires_at_ms=1,
+            )
+            refresh_response = MagicMock(is_success=False, status_code=400, text="bad refresh")
+            with patch("backend.services.team_usage.providers.claude_oauth.httpx.post", return_value=refresh_response):
+                with patch("backend.services.team_usage.providers.claude_oauth.httpx.get") as http_get:
+                    payload = provider.get_usage({"type": "claude_oauth", "tier": "team_standard"}, profile_dir)
+
+        self.assertEqual(payload["status"], "token_expired")
+        http_get.assert_not_called()
 
 
 if __name__ == "__main__":

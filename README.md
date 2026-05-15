@@ -6,7 +6,7 @@ This repo now centers on the internal website for XC Gradient. The Discord bot r
 
 - Internal website for tasks, OKRs, meetings, and week rollover
 - FastAPI backend with shared Notion and LLM integrations
-- Optional Discord command adapter over the same backend-facing logic
+- Discord messenger bot for meeting announcements and reminders (no slash commands)
 - Daily logs with manual end-of-day trigger in the web app, plus 05:00 Madrid automatic fallback, reflection generation, and streak tracking
 
 ## Installation
@@ -55,7 +55,7 @@ make bot
 
 ## Development
 
-The website is the primary product surface. New product logic should live behind the backend service layer and be reused by both the web API and any remaining Discord commands.
+The website is the primary product surface. New product logic belongs in the backend service layer. The Discord bot is messenger-only (meeting pollers) and should not receive new commands.
 
 ## License
 

@@ -1407,22 +1407,59 @@ class NotionService:
             return ""
         return title.split("·", 1)[0].strip()
 
-    def _default_current_week(self) -> str:
-        now = datetime.now()
-        iso_year, iso_week, _ = now.isocalendar()
-        return f"{iso_year % 100:02d}-W{iso_week:02d}"
-
     def get_current_week_from_settings(self) -> str:
         if not self.settings_db_id:
-            return self._default_current_week()
+            raise RuntimeError("No settings database configured.")
         rows = self._query_all(self.settings_db_id)
         if not rows:
             raise RuntimeError("Settings database is empty.")
         row = rows[0]
         week_code = self._property_text(row, "Current Week")
-        if not re.match(r"^\d{2}-W\d{1,2}$", week_code):
+        canonical = self._canonical_week_code(week_code)
+        if not canonical or not re.match(r"^\d{2}-W\d{2}$", canonical):
             raise RuntimeError(f"Invalid week code in settings: {week_code}")
-        return week_code
+        return canonical
+
+    def _infer_current_week_from_task_flags(self) -> str:
+        tasks = self._query_all(self.tasks_db_id)
+        flagged_weeks: set[str] = set()
+        for task in tasks:
+            if self._is_task_archived(task):
+                continue
+            if not self._property(task, "Is Current Week").get("checkbox", False):
+                continue
+            canonical = self._canonical_week_code(self._task_week_value(task))
+            if canonical:
+                flagged_weeks.add(canonical)
+        if not flagged_weeks:
+            raise RuntimeError(
+                "Unable to resolve current week from task flags. "
+                "Configure NOTION_SETTINGS_DB_ID or sync non-archived tasks with Is Current Week."
+            )
+        if len(flagged_weeks) > 1:
+            LOGGER.warning(
+                "Multiple task weeks are flagged as current week: %s. Using the latest.",
+                ", ".join(sorted(flagged_weeks, key=self._week_sort_key)),
+            )
+        return max(flagged_weeks, key=self._week_sort_key)
+
+    def resolve_current_week(self) -> str:
+        settings_error: Exception | None = None
+        if self.settings_db_id:
+            try:
+                return self.get_current_week_from_settings()
+            except Exception as exc:  # noqa: BLE001
+                settings_error = exc
+                LOGGER.warning("Falling back to task flags after Settings DB current-week lookup failed: %s", exc)
+        try:
+            return self._infer_current_week_from_task_flags()
+        except Exception as exc:  # noqa: BLE001
+            if settings_error is not None:
+                raise RuntimeError(
+                    "Unable to resolve current week from Settings DB or task flags. "
+                    f"Settings DB error: {settings_error}. Task flag error: {exc}"
+                ) from exc
+            raise
 
     def set_current_week_in_settings(self, week_code: str, status: str, count: int) -> None:
         if not self.settings_db_id:

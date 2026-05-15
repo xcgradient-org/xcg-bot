@@ -59,7 +59,7 @@ class TasksService:
         week_code = str(payload["week_code"]).upper()
         is_current_week = False
         try:
-            is_current_week = self.runtime.notion._week_matches(week_code, self.runtime.notion.get_current_week_from_settings())
+            is_current_week = self.runtime.notion._week_matches(week_code, self.runtime.notion.resolve_current_week())
         except Exception as exc:  # noqa: BLE001
             from backend.services.runtime import LOGGER
             LOGGER.warning("Could not resolve current week for new tasks; leaving Is Current Week false: %s", exc)

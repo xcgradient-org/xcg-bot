@@ -12,6 +12,8 @@ make web
 
 You can still use `make online` directly if you do not need the extra health check wrapper.
 
+Week rollover state is resolved from the Notion Settings DB when `NOTION_SETTINGS_DB_ID` is configured. If that database is absent, the app falls back to non-archived task rows flagged with `Is Current Week = true`. If neither source exists, `/api/current-week` and week rollover fail clearly instead of silently using the physical calendar week.
+
 Use a different host or port like this:
 
 ```bash

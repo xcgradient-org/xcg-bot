@@ -9,12 +9,7 @@ from backend.config import Settings, configure_logging, load_environment, load_s
 from backend.integrations.notion import NotionService
 from backend.integrations.reflection import ReflectionService
 from backend.services.streaks import start_daily_reset_task
-from bot.commands.blocker_command import register_blocker_command
-from bot.commands.daily_log_dedupe_command import register_daily_log_dedupe_command
-from bot.commands.meeting_command import register_meeting_command
 from bot.commands.meetings import start_meeting_reminder_poller, start_new_meeting_poller
-from bot.commands.rollover_command import register_rollover_command
-from bot.commands.task_command import register_task_command
 
 
 LOGGER = logging.getLogger("xcg_internal.bot")
@@ -32,24 +27,14 @@ class XCGradientOSBot(commands.Bot):
         self.meeting_reminder_task = None
 
     async def setup_hook(self) -> None:
-        register_blocker_command(self, self.tree, self.reflection, self.settings)
-        register_daily_log_dedupe_command(self, self.tree, self.notion, self.settings)
-        register_meeting_command(self.tree, self.notion, self.reflection, self.settings)
-        register_task_command(self, self.tree, self.notion, self.reflection, self.settings)
-        register_rollover_command(self.tree, self.notion, self.settings)
-        LOGGER.info("/meeting, /blocker, /tasks, /rollover, and /daily-log-dedupe commands registered")
+        # Sync empty tree to clear any previously-registered slash commands from Discord.
         synced = await self.tree.sync()
-        LOGGER.info("Slash commands synced: %s", len(synced))
+        LOGGER.info("Slash commands synced (messenger-only mode): %s", len(synced))
 
     async def on_ready(self) -> None:
         if not self.user:
             return
         LOGGER.info("Bot connected as %s", self.user)
-        try:
-            channel = self.get_channel(self.settings.discord_blockers_channel_id) or await self.fetch_channel(self.settings.discord_blockers_channel_id)
-            LOGGER.info("Blockers channel is live: %s (%s)", getattr(channel, "name", "unknown"), self.settings.discord_blockers_channel_id)
-        except Exception as exc:  # noqa: BLE001
-            LOGGER.exception("Unable to verify blockers channel %s: %s", self.settings.discord_blockers_channel_id, exc)
         try:
             channel = self.get_channel(self.settings.discord_announcements_channel_id) or await self.fetch_channel(self.settings.discord_announcements_channel_id)
             LOGGER.info("Announcements channel is live: %s (%s)", getattr(channel, "name", "unknown"), self.settings.discord_announcements_channel_id)
@@ -74,7 +59,7 @@ class XCGradientOSBot(commands.Bot):
                 self.settings.notion_meetings_db_id,
                 self.settings.discord_announcements_channel_id,
             )
-        LOGGER.info("Meetings poller active")
+        LOGGER.info("Meeting pollers active")
 
     async def close(self) -> None:
         if self.reset_task is not None:

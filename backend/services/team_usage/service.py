@@ -10,6 +10,7 @@ from .providers.claude_oauth import ClaudeOAuthProvider
 from .providers.codex_sqlite import CodexSQLiteProvider
 from .providers.openai_api import OpenAIApiProvider
 from .providers.anthropic_api import AnthropicApiProvider
+from .providers.cursor_api import CursorApiProvider
 
 _ROOT = Path(__file__).resolve().parents[3]
 _MEMBERS_FILE = _ROOT / "members.json"
@@ -18,6 +19,7 @@ _CLAUDE_OAUTH = ClaudeOAuthProvider()
 _CODEX_SQLITE = CodexSQLiteProvider()
 _OPENAI_API = OpenAIApiProvider()
 _ANTHROPIC_API = AnthropicApiProvider()
+_CURSOR_API = CursorApiProvider()
 
 
 def _load_config() -> dict[str, Any]:
@@ -36,6 +38,8 @@ def _fetch_member(member: dict[str, Any]) -> dict[str, Any]:
             result = _CLAUDE_OAUTH.get_usage(sub, profile_dir)
         elif provider_type == "codex":
             result = _CODEX_SQLITE.get_usage(sub, profile_dir)
+        elif provider_type == "cursor":
+            result = _CURSOR_API.get_usage(sub, profile_dir)
         else:
             result = {"type": provider_type, "status": "unknown_provider"}
         subscriptions.append(result)

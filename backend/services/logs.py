@@ -3,9 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from backend.domain.blockers import build_blocker_message, current_context, rewrite_blocker_message
 from backend.domain.founders import resolve_founder
 from backend.domain.founders import FOUNDER_BY_ID
-from bot.commands.log_command import build_blocker_message, current_context, rewrite_blocker_message
 from backend.services.streaks import MADRID_TZ
 
 

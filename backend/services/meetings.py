@@ -114,7 +114,7 @@ class MeetingsService:
         description = finalize_sentence(f"Attend {meeting['title']} on {meeting['date_label']}")
         is_current_week = False
         try:
-            is_current_week = self.runtime.notion._week_matches(week_code, self.runtime.notion.get_current_week_from_settings())
+            is_current_week = self.runtime.notion._week_matches(week_code, self.runtime.notion.resolve_current_week())
         except Exception as exc:  # noqa: BLE001
             from backend.services.runtime import LOGGER
             LOGGER.warning("Could not resolve current week for meeting attendance tasks; leaving false: %s", exc)

@@ -8,7 +8,8 @@
       "profile_dir": "~/.claude",
       "subscriptions": [
         {"type": "claude_oauth", "tier": "team_standard"},
-        {"type": "codex", "tier": "chatgpt_pro", "db_path": "~/.codex/logs_2.sqlite", "auth_path": "~/.codex/auth.json"}
+        {"type": "codex", "tier": "chatgpt_pro", "db_path": "~/.codex/logs_2.sqlite", "auth_path": "~/.codex/auth.json"},
+        {"type": "cursor", "tier": "pro"}
       ]
     },
     {

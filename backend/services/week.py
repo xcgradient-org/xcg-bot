@@ -6,7 +6,7 @@ class WeekService:
         self.runtime = runtime
 
     def week_status(self) -> dict[str, object]:
-        current_week = self.runtime.notion.get_current_week_from_settings()
+        current_week = self.runtime.notion.resolve_current_week()
         next_week = self.runtime.notion.get_next_week_code(current_week)
         incomplete_tasks = self.runtime.notion.find_incomplete_tasks_for_week(current_week)
         carryover_tasks = self.runtime.notion.find_carryover_tasks_in_week(next_week)
@@ -25,14 +25,14 @@ class WeekService:
         }
 
     def current_week_status(self) -> dict[str, str]:
-        current_week = self.runtime.notion.get_current_week_from_settings()
+        current_week = self.runtime.notion.resolve_current_week()
         return {
             "current_week": current_week,
             "next_week": self.runtime.notion.get_next_week_code(current_week),
         }
 
     def run_weekly_rollover(self, payload: dict[str, str]) -> dict[str, object]:
-        current_week = self.runtime.notion.get_current_week_from_settings()
+        current_week = self.runtime.notion.resolve_current_week()
         requested_week = str(payload.get("current_week") or "").strip()
         if requested_week and requested_week != current_week:
             raise RuntimeError(f"Week changed before rollover. Refresh first: current week is now {current_week}.")

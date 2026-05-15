@@ -49,7 +49,7 @@ function UsageBar({ utilization }) {
 }
 
 function ProviderLabel({ type }) {
-  const labels = { claude_oauth: "Claude", codex: "Codex", openai_api: "OpenAI", anthropic_api: "Anthropic API" };
+  const labels = { claude_oauth: "Claude", codex: "Codex", cursor: "Cursor", copilot: "Copilot", openai_api: "OpenAI", anthropic_api: "Anthropic API" };
   return <span className="sub-provider-name">{labels[type] ?? type}</span>;
 }
 
@@ -145,6 +145,50 @@ function ClaudeSubscription({ sub }) {
   );
 }
 
+function CursorSubscription({ sub }) {
+  const cycleEndStr = sub.billing_cycle_end ? new Date(parseInt(sub.billing_cycle_end)).toISOString() : null;
+  const resetBilling = timeUntil(cycleEndStr);
+
+  if (sub.status !== "ok") {
+    return (
+      <div className="sub-block sub-block-muted">
+        <div className="sub-head">
+          <ProviderLabel type="cursor" />
+          <span className="sub-tier">{sub.tier}</span>
+          <StatusDot status={sub.status} />
+        </div>
+        <p className="sub-status-msg">
+          {sub.status === "not_configured" ? "Not configured" :
+           sub.status === "token_expired" ? "Token expired" :
+           sub.status === "timeout" ? "Request timed out" :
+           sub.status}
+        </p>
+        {sub.hint && <code className="sub-hint">{sub.hint}</code>}
+      </div>
+    );
+  }
+
+  const { plan_usage } = sub;
+
+  return (
+    <div className="sub-block">
+      <div className="sub-head">
+        <ProviderLabel type="cursor" />
+        <span className="sub-tier">{sub.tier}</span>
+        <StatusDot status="ok" />
+      </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">Fast Requests{resetBilling ? <> · resets {resetBilling}</> : null}</span>
+        <UsageBar utilization={plan_usage?.auto_percent} />
+      </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">API Models</span>
+        <UsageBar utilization={plan_usage?.api_percent} />
+      </div>
+    </div>
+  );
+}
+
 function MemberCard({ member, loading }) {
   const initials = member.name?.charAt(0)?.toUpperCase() ?? "?";
   const subs = member.subscriptions ?? [];
@@ -164,11 +208,11 @@ function MemberCard({ member, loading }) {
       ) : subs.length === 0 ? (
         <div className="sub-block sub-block-muted"><p className="sub-status-msg">No subscriptions configured</p></div>
       ) : (
-        subs.map((sub, i) =>
-        sub.type === "codex"
-          ? <CodexSubscription key={i} sub={sub} />
-          : <ClaudeSubscription key={i} sub={sub} />
-      )
+        subs.map((sub, i) => {
+          if (sub.type === "codex") return <CodexSubscription key={i} sub={sub} />;
+          if (sub.type === "cursor") return <CursorSubscription key={i} sub={sub} />;
+          return <ClaudeSubscription key={i} sub={sub} />;
+        })
       )}
     </div>
   );
