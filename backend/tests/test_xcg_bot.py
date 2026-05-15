@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -408,6 +409,57 @@ class StreakTests(unittest.TestCase):
         self.assertFalse(streaks.should_run_startup_reset(before_cutoff))
         self.assertTrue(streaks.should_run_startup_reset(after_cutoff))
 
+    def test_maintenance_ran_today_false_when_stamp_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
+            self.assertFalse(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
+
+    def test_maintenance_ran_today_true_when_stamp_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
+            stamp.write_text("2026-04-29", encoding="utf-8")
+            self.assertTrue(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
+
+    def test_maintenance_ran_today_false_when_stamp_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
+            stamp.write_text("2026-04-28", encoding="utf-8")
+            self.assertFalse(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
+
+
+class DailyResetLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_startup_maintenance_skipped_when_stamp_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
+            today = dt.date(2026, 4, 29)
+            stamp.write_text(today.isoformat(), encoding="utf-8")
+            notion = MagicMock()
+            reflection = MagicMock()
+            after_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 9, 0))
+            with patch("backend.services.streaks.datetime") as mocked_dt:
+                mocked_dt.now.return_value = after_cutoff
+                mocked_dt.combine = dt.datetime.combine
+                with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await streaks.daily_reset_loop(notion, reflection, stamp_path=stamp)
+            notion.get_all_streak_rows.assert_not_called()
+
+    async def test_startup_maintenance_runs_when_stamp_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
+            notion = MagicMock()
+            notion.get_all_streak_rows.return_value = []
+            reflection = MagicMock()
+            after_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 9, 0))
+            with patch("backend.services.streaks.datetime") as mocked_dt:
+                mocked_dt.now.return_value = after_cutoff
+                mocked_dt.combine = dt.datetime.combine
+                with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
+                    with self.assertRaises(asyncio.CancelledError):
+                        await streaks.daily_reset_loop(notion, reflection, stamp_path=stamp)
+            self.assertGreater(notion.get_all_streak_rows.call_count, 0)
+            self.assertEqual(stamp.read_text(encoding="utf-8").strip(), "2026-04-29")
+
 
 class RuntimeBuildTests(unittest.TestCase):
     @patch("backend.services.runtime.load_dotenv")
@@ -491,7 +543,7 @@ class WebLoggingTests(unittest.TestCase):
             None,
         ]
 
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             payload = service.logging_status()
 
         self.assertEqual(payload["today_iso"], "2026-05-12")
@@ -524,7 +576,7 @@ class WebLoggingTests(unittest.TestCase):
         reflection_service.generate_reflection.return_value = "Manual log"
 
         fake_now = streaks.MADRID_TZ.localize(dt.datetime(2026, 5, 12, 21, 3, 0))
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             with patch("backend.services.logs.datetime") as mocked_datetime:
                 mocked_datetime.now.return_value = fake_now
                 mocked_datetime.fromisoformat.side_effect = dt.datetime.fromisoformat
@@ -555,7 +607,7 @@ class WebLoggingTests(unittest.TestCase):
         notion_service.find_daily_log.return_value = None
         notion_service.query_log_tasks.return_value = ([], [], "26-W20")
 
-        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20")):
+        with patch("backend.services.logs.current_context", return_value=log_command.LogContext("2026-05-12", "26-W20", "2026-05-12")):
             payload = service.log_now({"founder": "oriol"})
 
         notion_service.create_daily_log.assert_not_called()
@@ -632,7 +684,7 @@ class LogCommandAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_finalize_log_runs_sync_work_via_to_thread(self) -> None:
         state = MagicMock()
         state.founder = {"name": "Oriol", "role": "CEO"}
-        state.ctx = log_command.LogContext("2026-05-04", "26-W19")
+        state.ctx = log_command.LogContext("2026-05-04", "26-W19", "2026-05-04")
         state.settings = MagicMock(discord_blockers_channel_id=123)
         state.bot = MagicMock()
         interaction = MagicMock()
@@ -654,7 +706,7 @@ class LogCommandAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_finalize_log_succeeds_when_streak_refresh_is_unavailable(self) -> None:
         state = MagicMock()
         state.founder = {"name": "Oriol", "role": "CEO"}
-        state.ctx = log_command.LogContext("2026-05-04", "26-W19")
+        state.ctx = log_command.LogContext("2026-05-04", "26-W19", "2026-05-04")
         state.settings = MagicMock(discord_blockers_channel_id=123)
         state.bot = MagicMock()
         interaction = MagicMock()
@@ -1194,6 +1246,9 @@ class NotionServiceTests(unittest.TestCase):
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
         del service.client.databases.query
+        service.client.databases.retrieve.return_value = {
+            "data_sources": [{"id": "source-123"}],
+        }
         service.client.data_sources.query.return_value = {
             "results": [{"id": "page-1"}],
             "has_more": False,
@@ -1203,8 +1258,8 @@ class NotionServiceTests(unittest.TestCase):
         result = service._query_all("db-123")
 
         self.assertEqual(result, [{"id": "page-1"}])
-        service.client.databases.retrieve.assert_not_called()
-        service.client.data_sources.query.assert_called_once_with(data_source_id="db-123", page_size=100)
+        service.client.databases.retrieve.assert_called_once_with(database_id="db-123")
+        service.client.data_sources.query.assert_called_once_with(data_source_id="source-123", page_size=100)
 
     def test_primary_data_source_id_returns_first_source(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")

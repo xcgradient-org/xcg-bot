@@ -29,6 +29,10 @@ FALLBACK_LOGO = base64.b64decode(
 )
 GROUPS_PER_PAGE = 2
 DEFAULT_BLANK_PAGES = 2
+_TASK_STATUS_PREFIX_RE = re.compile(
+    r"^[⚠↩✅]\s*(?:stale|carryover|carry[\s\-]over|done)\s*\|\s*",
+    re.IGNORECASE,
+)
 
 MAKEFILE_TEXT = """DOC ?= $(notdir $(CURDIR))
 
@@ -537,13 +541,22 @@ function renderSectionPage(slide, page, theme, rect) {
   } else if (groups.length === 1) {
     renderGroupCard(slide, groups[0], theme, rect, leftX, contentY, 5.5, 2.0);
   } else {
-    const columnWidth = 5.1;
-    const boxHeight = 1.58;
-    groups.slice(0, 4).forEach((group, index) => {
-      const col = index % 2;
-      const row = Math.floor(index / 2);
-      renderGroupCard(slide, group, theme, rect, leftX + col * (columnWidth + 0.18), contentY + row * (boxHeight + 0.2), columnWidth, boxHeight);
-    });
+    const hasChart = page.chart && Array.isArray(page.chart.labels) && page.chart.labels.length > 0;
+    if (hasChart) {
+      const cardW = 5.5;
+      const cardH = 1.45;
+      groups.slice(0, 4).forEach((group, index) => {
+        renderGroupCard(slide, group, theme, rect, leftX, contentY + index * (cardH + 0.2), cardW, cardH);
+      });
+    } else {
+      const columnWidth = 5.1;
+      const boxHeight = 1.58;
+      groups.slice(0, 4).forEach((group, index) => {
+        const col = index % 2;
+        const row = Math.floor(index / 2);
+        renderGroupCard(slide, group, theme, rect, leftX + col * (columnWidth + 0.18), contentY + row * (boxHeight + 0.2), columnWidth, boxHeight);
+      });
+    }
   }
 
   if (page.chart) {
@@ -754,8 +767,8 @@ def _slugify(value: str) -> str:
 
 
 def _clean_task_line(text: str) -> str:
-    cleaned = finalize_sentence(text)
-    return cleaned
+    text = _TASK_STATUS_PREFIX_RE.sub("", str(text or "")).strip()
+    return finalize_sentence(text)
 
 
 def _task_list_text(descriptions: list[str]) -> str:
@@ -1030,7 +1043,7 @@ class WeekPwpReportService:
                         ensure_ascii=False,
                         indent=2,
                     ),
-                    max_output_tokens=1200,
+                    max_output_tokens=2500,
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Completed-work synthesis failed; falling back to heuristics: %s", exc)
@@ -1043,7 +1056,6 @@ class WeekPwpReportService:
                 "groups": fallback_groups,
                 "insights": [
                     f"{len(done_descriptions)} completed task(s) captured for {founder_name}.",
-                    "The fallback generator grouped tasks by their leading topic words.",
                 ],
             }
 
@@ -1080,7 +1092,7 @@ class WeekPwpReportService:
                         ensure_ascii=False,
                         indent=2,
                     ),
-                    max_output_tokens=1200,
+                    max_output_tokens=2500,
                 )
             except Exception as exc:  # noqa: BLE001
                 LOGGER.warning("Pending-work synthesis failed; falling back to heuristics: %s", exc)
@@ -1137,12 +1149,13 @@ class WeekPwpReportService:
                         "pending_summary": pending_analysis.get("summary"),
                         "done_groups": [group.get("title") for group in done_analysis.get("groups", [])],
                         "pending_groups": [group.get("title") for group in pending_analysis.get("groups", [])],
+                        "pending_next_actions": pending_analysis.get("next_actions") or [],
                         "open_count": len(pending_analysis.get("groups", [])),
                     },
                     ensure_ascii=False,
                     indent=2,
                 ),
-                max_output_tokens=700,
+                max_output_tokens=1200,
             )
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Cover copy synthesis failed; using fallback copy: %s", exc)

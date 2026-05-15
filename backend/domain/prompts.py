@@ -34,6 +34,8 @@ WEEK_PWP_COMPLETED_ANALYSIS_PROMPT = (
     "chart must be an object with title, labels, values, and note. labels and values must align with the groups array order. "
     "groups must be an array of 2-5 objects with keys title, summary, tasks, and impact. "
     "tasks must contain only the provided completed task descriptions, lightly cleaned. "
+    "Task descriptions may be prefixed with '⚠ stale | ' or '↩ carryover | ' — strip these prefixes before using the task text. "
+    "Group titles must be descriptive business themes of 2-4 words (e.g. 'Product Launch Prep', 'Client Onboarding'), not status labels or sentence fragments. "
     "insights must be an array of short bullets about the most important completed-work takeaways. "
     "Do not invent tasks, metrics, or project names. Do not add markdown or commentary."
 )
@@ -45,7 +47,9 @@ WEEK_PWP_PENDING_ANALYSIS_PROMPT = (
     "chart must be an object with title, labels, values, and note. labels and values must align with the groups array order. "
     "groups must be an array of 2-5 objects with keys title, summary, tasks, and risk. "
     "tasks must contain only the provided not-done task descriptions, lightly cleaned. "
-    "next_actions must be an array of short, concrete bullets describing what should happen next week. "
+    "Task descriptions may be prefixed with '⚠ stale | ' or '↩ carryover | ' — strip these prefixes before using the task text. "
+    "Group titles must be descriptive business themes of 2-4 words (e.g. 'Platform Roadmap', 'Sales Pipeline'), not status labels or sentence fragments. "
+    "next_actions must be an array of short, concrete task-level bullets (e.g. 'Finalize the API auth flow.', 'Deploy the staging environment.') — do NOT use group theme titles as bullets. "
     "blank_pages must be an integer >= 1 describing how many blank continuation slides should follow the next-week page. "
     "Do not invent tasks, metrics, or project names. Do not add markdown or commentary."
 )
@@ -55,6 +59,8 @@ WEEK_PWP_COMPOSE_PROMPT = (
     "Return valid JSON with exactly these keys: cover, next_week. "
     "cover must be an object with headline, subtitle, summary, and intro. "
     "next_week must be an object with headline, summary, and bullets. "
+    "next_week.bullets must be concrete, actionable task-level bullets taken from or inspired by pending_next_actions — "
+    "do NOT use group titles or theme names as bullets. Each bullet should describe a specific action (e.g. 'Finalize the API auth flow.', not 'Infrastructure & Monitoring.'). "
     "Use the provided done-work and carry-over analyses without inventing new tasks or metrics. "
     "Do not add markdown or commentary."
 )

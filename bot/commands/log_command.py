@@ -31,11 +31,12 @@ BLOCKER_REWRITE_PROMPT = (
 # ---------------------------------------------------------------------------
 
 class LogContext:
-    __slots__ = ("today_iso", "week_code")
+    __slots__ = ("today_iso", "week_code", "calendar_date_iso")
 
-    def __init__(self, today_iso: str, week_code: str) -> None:
+    def __init__(self, today_iso: str, week_code: str, calendar_date_iso: str) -> None:
         self.today_iso = today_iso
         self.week_code = week_code
+        self.calendar_date_iso = calendar_date_iso
 
 
 def _effective_log_datetime(now: datetime | None = None) -> datetime:
@@ -50,11 +51,18 @@ def _effective_log_datetime(now: datetime | None = None) -> datetime:
 
 
 def current_context(now: datetime | None = None) -> LogContext:
+    actual = now or datetime.now(MADRID_TZ)
+    if actual.tzinfo is None:
+        actual = MADRID_TZ.localize(actual)
+    else:
+        actual = actual.astimezone(MADRID_TZ)
+    calendar_date_iso = actual.date().isoformat()
     effective_now = _effective_log_datetime(now)
     iso_year, iso_week, _ = effective_now.isocalendar()
     return LogContext(
         today_iso=effective_now.date().isoformat(),
         week_code=f"{iso_year % 100:02d}-W{iso_week:02d}",
+        calendar_date_iso=calendar_date_iso,
     )
 
 
@@ -237,6 +245,16 @@ def _complete_log_sync(
         completed_task_ids=state.notion.page_ids(task_pages),
         notes_text=reflection_text,
     )
+
+    extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
+    if extra_done:
+        for task in task_pages:
+            done_date = state.notion._property_date(task, "Done date")  # noqa: SLF001
+            if done_date and done_date.startswith(extra_done):
+                try:
+                    state.notion.update_task_done_date(task, ctx.today_iso)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("Failed to backdate Done date for task %s: %s", task["id"], exc)
 
     new_current: int | None = None
     if not hasattr(state.notion, "streaks_available") or state.notion.streaks_available():
@@ -531,12 +549,14 @@ def register_log_command(bot, tree: app_commands.CommandTree, notion, reflection
                     ephemeral=True,
                 )
                 return
+            extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
             candidate_tasks, completed_tasks, active_week = await asyncio.to_thread(
                 notion.query_log_tasks,
                 founder["role"],
                 ctx.today_iso,
                 ctx.week_code,
                 founder["name"],
+                extra_done,
             )
             ctx.week_code = active_week
         except Exception as exc:  # noqa: BLE001

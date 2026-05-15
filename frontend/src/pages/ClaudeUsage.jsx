@@ -53,14 +53,10 @@ function ProviderLabel({ type }) {
   return <span className="sub-provider-name">{labels[type] ?? type}</span>;
 }
 
-function fmtTokens(n) {
-  if (!n && n !== 0) return "—";
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
-  return String(n);
-}
-
 function CodexSubscription({ sub }) {
+  const reset5h = timeUntil(sub.five_hour?.resets_at);
+  const reset7d = timeUntil(sub.seven_day?.resets_at);
+
   if (sub.status !== "ok") {
     return (
       <div className="sub-block sub-block-muted">
@@ -77,9 +73,6 @@ function CodexSubscription({ sub }) {
     );
   }
 
-  const today = sub.today ?? {};
-  const sevenDay = sub.seven_day ?? {};
-
   return (
     <div className="sub-block">
       <div className="sub-head">
@@ -87,35 +80,20 @@ function CodexSubscription({ sub }) {
         <span className="sub-tier">{sub.tier}</span>
         <StatusDot status="ok" />
       </div>
-      {sub.account?.email && (
-        <span className="sub-account-email">{sub.account.email}</span>
-      )}
-      <div className="codex-stats-grid">
-        <div className="codex-stat">
-          <span className="codex-stat-label">Today · in</span>
-          <span className="codex-stat-value">{fmtTokens(today.input_tokens)}</span>
-        </div>
-        <div className="codex-stat">
-          <span className="codex-stat-label">Today · out</span>
-          <span className="codex-stat-value">{fmtTokens(today.output_tokens)}</span>
-        </div>
-        <div className="codex-stat">
-          <span className="codex-stat-label">7d · in</span>
-          <span className="codex-stat-value">{fmtTokens(sevenDay.input_tokens)}</span>
-        </div>
-        <div className="codex-stat">
-          <span className="codex-stat-label">7d · out</span>
-          <span className="codex-stat-value">{fmtTokens(sevenDay.output_tokens)}</span>
-        </div>
-        <div className="codex-stat">
-          <span className="codex-stat-label">7d · sessions</span>
-          <span className="codex-stat-value">{sevenDay.sessions ?? 0}</span>
-        </div>
-        <div className="codex-stat">
-          <span className="codex-stat-label">7d · turns</span>
-          <span className="codex-stat-value">{sevenDay.turns ?? 0}</span>
-        </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">5h{reset5h ? <> · resets {reset5h}</> : null}</span>
+        <UsageBar utilization={sub.five_hour?.utilization} />
       </div>
+      <div className="sub-metric">
+        <span className="sub-metric-label">7d{reset7d ? <> · resets {reset7d}</> : null}</span>
+        <UsageBar utilization={sub.seven_day?.utilization} />
+      </div>
+      {sub.quota_status !== "ok" && (
+        <p className="sub-status-msg">
+          Live quota unavailable: {sub.quota_status}
+          {sub.quota_hint ? ` (${sub.quota_hint})` : ""}
+        </p>
+      )}
     </div>
   );
 }

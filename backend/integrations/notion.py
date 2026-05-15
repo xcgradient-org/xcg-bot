@@ -6,12 +6,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import pytz
 from notion_client import Client
 
 from backend.domain.founders import FOUNDER_BY_ID
 
 
 LOGGER = logging.getLogger("xcg_bot.notion")
+_MADRID_TZ = pytz.timezone("Europe/Madrid")
 DONE_NAMES = {"done", "complete", "completed"}
 ARCHIVED_NAMES = {"archived", "archive"}
 UNSET = object()
@@ -100,6 +102,7 @@ class NotionService:
         today_iso: str,
         week_code: str,
         founder_name: str | None = None,
+        extra_done_date_iso: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
         try:
             tasks = self._query_all(self.tasks_db_id)
@@ -120,7 +123,10 @@ class NotionService:
         done_today_ids = {
             task["id"]
             for task in role_tasks
-            if self._is_task_done(task) and self._date_matches_day(task, "Done date", today_iso)
+            if self._is_task_done(task) and (
+                self._date_matches_day(task, "Done date", today_iso)
+                or (extra_done_date_iso and self._date_matches_day(task, "Done date", extra_done_date_iso))
+            )
         }
         done_other_day_ids = {
             task["id"]
@@ -278,6 +284,7 @@ class NotionService:
         *,
         current_streak: int,
         best_streak: int | None,
+        last_log_iso: str | None = None,
     ) -> None:
         schema = self._retrieve_schema(self.team_db_id)
         properties: dict[str, Any] = {}
@@ -288,6 +295,10 @@ class NotionService:
         if best_streak is not None:
             best_prop_name = self._existing_property_name(schema, "Best Streak") or "Best Streak"
             properties[best_prop_name] = {"number": best_streak}
+
+        if last_log_iso is not None:
+            last_log_prop_name = self._existing_property_name(schema, "Last Log") or "Last Log"
+            properties[last_log_prop_name] = {"date": {"start": last_log_iso}}
 
         try:
             self.client.pages.update(page_id=row_id, properties=properties)
@@ -492,6 +503,17 @@ class NotionService:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to update task completion for {task['id']}: {exc}") from exc
 
+    def update_task_done_date(self, task: dict[str, Any], date_iso: str) -> None:
+        db_schema = self._retrieve_schema(self.tasks_db_id)
+        done_date_prop_name = self._existing_property_name(db_schema, "Done date") or "Done date"
+        try:
+            self.client.pages.update(
+                page_id=task["id"],
+                properties={done_date_prop_name: {"date": {"start": date_iso}}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to update Done date for {task['id']}: {exc}") from exc
+
     def _task_completion_properties(
         self,
         task: dict[str, Any],
@@ -649,6 +671,7 @@ class NotionService:
         next_cursor: str | None = None
         query_fn = getattr(self.client.databases, "query", None)
         query_kwargs_name = "database_id"
+        resolved_query_id = database_id
 
         if query_fn is None:
             data_sources = getattr(self.client, "data_sources", None)
@@ -658,12 +681,16 @@ class NotionService:
 
             query_fn = data_source_query
             query_kwargs_name = "data_source_id"
+            # Newer notion-client versions expose only data_sources.query, but
+            # callers still pass a database ID here. Resolve the primary source
+            # first so we do not send a database ID to the data-source endpoint.
+            resolved_query_id = self.primary_data_source_id(database_id)
 
         while True:
             payload: dict[str, Any] = {"page_size": 100}
             if next_cursor:
                 payload["start_cursor"] = next_cursor
-            response = query_fn(**{query_kwargs_name: database_id}, **payload)
+            response = query_fn(**{query_kwargs_name: resolved_query_id}, **payload)
             results.extend(response.get("results", []))
             if not response.get("has_more"):
                 return results
@@ -828,7 +855,16 @@ class NotionService:
 
     def _date_matches_day(self, page: dict[str, Any], property_name: str, day_iso: str) -> bool:
         value = self._property_date(page, property_name)
-        return bool(value) and value.startswith(day_iso)
+        if not value:
+            return False
+        if len(value) <= 10:
+            return value == day_iso
+        normalized = value.replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(normalized)
+            return dt.astimezone(_MADRID_TZ).date().isoformat() == day_iso
+        except ValueError:
+            return value.startswith(day_iso)
 
     def _resolve_active_week(self, tasks: list[dict[str, Any]], *, preferred_week: str) -> str:
         week_codes = {self._task_week_value(task) for task in tasks if self._task_week_value(task)}

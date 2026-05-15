@@ -305,41 +305,6 @@
   margin: 0;
 }
 
-.sub-account-email {
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--muted);
-  letter-spacing: .02em;
-}
-
-.codex-stats-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px 12px;
-}
-
-.codex-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.codex-stat-label {
-  font-family: var(--mono);
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  color: var(--muted);
-}
-
-.codex-stat-value {
-  font-family: var(--mono);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  color: var(--ink);
-}
-
 .sub-hint {
   display: block;
   font-family: var(--mono);

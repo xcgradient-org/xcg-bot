@@ -1150,8 +1150,18 @@ $("#projectSelect").addEventListener("change", e => {
 });
 
 // Week input
-function initWeek() {
-  state.thisWeekCode = thisWeekCode();
+async function initWeek() {
+  try {
+    const r = await fetch("/api/current-week", { signal: AbortSignal.timeout(8000) });
+    if (r.ok) {
+      const data = await r.json();
+      state.thisWeekCode = data.current_week || thisWeekCode();
+    } else {
+      state.thisWeekCode = thisWeekCode();
+    }
+  } catch {
+    state.thisWeekCode = thisWeekCode();
+  }
   $("#thisWeek").textContent = state.thisWeekCode;
   state.weekCode = state.thisWeekCode;
   $("#weekInput").value = state.weekCode;
