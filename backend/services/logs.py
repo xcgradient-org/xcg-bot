@@ -24,14 +24,12 @@ class LogsService:
     def log_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
         founder = resolve_founder(payload)
         ctx = current_context()
-        extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
         already_logged = self.runtime.notion.has_daily_log(founder["name"], ctx.today_iso)
         candidate_tasks, completed_tasks, active_week = self.runtime.notion.query_log_tasks(
             founder["role"],
             ctx.today_iso,
             ctx.week_code,
             founder["name"],
-            extra_done_date_iso=extra_done,
         )
         ctx.week_code = active_week
         completed_ids = {task["id"] for task in completed_tasks}
@@ -70,7 +68,6 @@ class LogsService:
     def log_now(self, payload: dict[str, Any]) -> dict[str, Any]:
         founder = resolve_founder(payload)
         ctx = current_context()
-        extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
         logged_at_iso = datetime.now(MADRID_TZ).isoformat()
         result = self.auto_create_log_for_founder(
             founder_name=founder["name"],
@@ -79,7 +76,6 @@ class LogsService:
             week_code=ctx.week_code,
             raw_notes="Manual end-of-day log from the internal site.",
             logged_at_iso=logged_at_iso,
-            extra_done_date_iso=extra_done,
         )
         row = self.runtime.notion.find_daily_log(founder["name"], ctx.today_iso)
         return {
@@ -97,7 +93,6 @@ class LogsService:
     def create_log(self, payload: dict[str, Any]) -> dict[str, Any]:
         founder = resolve_founder(payload)
         ctx = current_context()
-        extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
         if self.runtime.notion.has_daily_log(founder["name"], ctx.today_iso):
             raise RuntimeError(f"{founder['name']} already logged for {ctx.today_iso}.")
 
@@ -106,22 +101,19 @@ class LogsService:
             ctx.today_iso,
             ctx.week_code,
             founder["name"],
-            extra_done_date_iso=extra_done,
         )
         ctx.week_code = active_week
         selected_task_ids = {str(task_id) for task_id in payload.get("selected_task_ids", [])}
         original_ids = {task["id"] for task in completed_tasks}
         task_by_id = {task["id"]: task for task in candidate_tasks}
         selected_tasks = [task for task in candidate_tasks if task["id"] in selected_task_ids]
+        done_at_iso = datetime.now(MADRID_TZ).isoformat()
 
         for task in candidate_tasks:
             was_completed = task["id"] in original_ids
             should_be_completed = task["id"] in selected_task_ids
             if was_completed != should_be_completed:
-                self.runtime.notion.set_task_completion(task, completed=should_be_completed, today_iso=ctx.today_iso)
-
-        if extra_done:
-            self._backdate_extra_tasks(selected_tasks, extra_done, ctx.today_iso)
+                self.runtime.notion.set_task_completion(task, completed=should_be_completed, done_at_iso=done_at_iso)
 
         missing_ids = selected_task_ids - set(task_by_id)
         if missing_ids:
@@ -206,7 +198,6 @@ class LogsService:
         week_code: str,
         raw_notes: str = "Automatic log created from completed tasks.",
         logged_at_iso: str | None = None,
-        extra_done_date_iso: str | None = None,
     ) -> dict[str, Any]:
         existing_row = self.runtime.notion.find_daily_log(founder_name, today_iso)
         if existing_row is not None:
@@ -223,7 +214,6 @@ class LogsService:
             today_iso,
             week_code,
             founder_name,
-            extra_done_date_iso=extra_done_date_iso,
         )
         if not completed_tasks:
             return {
@@ -262,8 +252,6 @@ class LogsService:
             completed_task_ids=self.runtime.notion.page_ids(completed_tasks),
             notes_text=reflection_text,
         )
-        if extra_done_date_iso:
-            self._backdate_extra_tasks(completed_tasks, extra_done_date_iso, today_iso)
         streak = self._sync_streak(founder_name, today_iso)
         return {
             "created": True,
@@ -278,8 +266,7 @@ class LogsService:
         if not row:
             return None
         created_time = str(
-            self.runtime.notion._property_date(row, "Date")  # noqa: SLF001
-            or self.runtime.notion._property_date(row, "Created on")  # noqa: SLF001
+            self.runtime.notion._property_date(row, "Logged At")  # noqa: SLF001
             or row.get("created_time")
             or ""
         ).strip()
@@ -299,21 +286,6 @@ class LogsService:
         except ValueError:
             return None
         return timestamp.astimezone(MADRID_TZ).strftime("%H:%M")
-
-    def _backdate_extra_tasks(
-        self,
-        tasks: list[dict[str, Any]],
-        extra_done_date_iso: str,
-        today_iso: str,
-    ) -> None:
-        for task in tasks:
-            done_date = self.runtime.notion._property_date(task, "Done date")  # noqa: SLF001
-            if done_date and done_date.startswith(extra_done_date_iso):
-                try:
-                    self.runtime.notion.update_task_done_date(task, today_iso)
-                except Exception as exc:  # noqa: BLE001
-                    from backend.services.runtime import LOGGER
-                    LOGGER.warning("Failed to backdate Done date for task %s: %s", task["id"], exc)
 
     def _sync_streak(self, founder_name: str, today_iso: str) -> int | None:
         if not self.runtime.notion.streaks_available():

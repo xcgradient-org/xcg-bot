@@ -16,6 +16,7 @@ if str(BOT_DIR) not in sys.path:
 
 from backend import config as main
 from backend.integrations import notion, reflection
+from backend.services.daily_log_dedupe import DailyLogDedupeService
 from backend.services import internal_tools as internal_server
 from backend.services import runtime as runtime_service
 from backend.services import streaks
@@ -409,56 +410,32 @@ class StreakTests(unittest.TestCase):
         self.assertFalse(streaks.should_run_startup_reset(before_cutoff))
         self.assertTrue(streaks.should_run_startup_reset(after_cutoff))
 
-    def test_maintenance_ran_today_false_when_stamp_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
-            self.assertFalse(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
-
-    def test_maintenance_ran_today_true_when_stamp_matches(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
-            stamp.write_text("2026-04-29", encoding="utf-8")
-            self.assertTrue(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
-
-    def test_maintenance_ran_today_false_when_stamp_is_stale(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
-            stamp.write_text("2026-04-28", encoding="utf-8")
-            self.assertFalse(streaks.maintenance_ran_today(stamp, date(2026, 4, 29)))
-
 
 class DailyResetLoopTests(unittest.IsolatedAsyncioTestCase):
-    async def test_startup_maintenance_skipped_when_stamp_is_current(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
-            today = dt.date(2026, 4, 29)
-            stamp.write_text(today.isoformat(), encoding="utf-8")
-            notion = MagicMock()
-            reflection = MagicMock()
-            after_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 9, 0))
-            with patch("backend.services.streaks.datetime") as mocked_dt:
-                mocked_dt.now.return_value = after_cutoff
-                mocked_dt.combine = dt.datetime.combine
-                with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
-                    with self.assertRaises(asyncio.CancelledError):
-                        await streaks.daily_reset_loop(notion, reflection, stamp_path=stamp)
-            notion.get_all_streak_rows.assert_not_called()
+    async def test_startup_maintenance_skipped_before_cutoff(self) -> None:
+        notion = MagicMock()
+        reflection = MagicMock()
+        before_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 4, 59))
+        with patch("backend.services.streaks.datetime") as mocked_dt:
+            mocked_dt.now.return_value = before_cutoff
+            mocked_dt.combine = dt.datetime.combine
+            with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
+                    await streaks.daily_reset_loop(notion, reflection)
+        notion.get_all_streak_rows.assert_not_called()
 
-    async def test_startup_maintenance_runs_when_stamp_absent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            stamp = Path(tmpdir) / "maintenance_last_run.stamp"
-            notion = MagicMock()
-            notion.get_all_streak_rows.return_value = []
-            reflection = MagicMock()
-            after_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 9, 0))
-            with patch("backend.services.streaks.datetime") as mocked_dt:
-                mocked_dt.now.return_value = after_cutoff
-                mocked_dt.combine = dt.datetime.combine
-                with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
-                    with self.assertRaises(asyncio.CancelledError):
-                        await streaks.daily_reset_loop(notion, reflection, stamp_path=stamp)
-            self.assertGreater(notion.get_all_streak_rows.call_count, 0)
-            self.assertEqual(stamp.read_text(encoding="utf-8").strip(), "2026-04-29")
+    async def test_startup_maintenance_runs_after_cutoff(self) -> None:
+        notion = MagicMock()
+        notion.get_all_streak_rows.return_value = []
+        reflection = MagicMock()
+        after_cutoff = streaks.MADRID_TZ.localize(dt.datetime(2026, 4, 29, 9, 0))
+        with patch("backend.services.streaks.datetime") as mocked_dt:
+            mocked_dt.now.return_value = after_cutoff
+            mocked_dt.combine = dt.datetime.combine
+            with patch("backend.services.streaks.asyncio.sleep", side_effect=asyncio.CancelledError):
+                with self.assertRaises(asyncio.CancelledError):
+                    await streaks.daily_reset_loop(notion, reflection)
+        self.assertGreater(notion.get_all_streak_rows.call_count, 0)
 
 
 class RuntimeBuildTests(unittest.TestCase):
@@ -525,6 +502,7 @@ class AutomaticLogTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(results[0]["created"])
         self.assertEqual(results[0]["today_iso"], "2026-05-12")
+        notion_service.query_log_tasks.assert_called_once_with("CEO", "2026-05-12", "26-W20", "Oriol")
 
 
 class WebLoggingTests(unittest.TestCase):
@@ -551,6 +529,19 @@ class WebLoggingTests(unittest.TestCase):
         self.assertTrue(payload["founders"][0]["logged"])
         self.assertEqual(payload["founders"][0]["logged_at"], "21:03")
         self.assertFalse(payload["founders"][1]["logged"])
+
+    def test_row_logged_at_prefers_logged_at_property(self) -> None:
+        notion_service = MagicMock()
+        reflection_service = MagicMock()
+        runtime = MagicMock()
+        runtime.notion = notion_service
+        runtime.reflection = reflection_service
+        service = LogsService(runtime)
+        notion_service._property_date.side_effect = ["2026-05-12T19:03:00.000Z"]
+
+        logged_at = service._row_logged_at({"created_time": "2026-05-12T18:00:00.000Z"})
+
+        self.assertEqual(logged_at, "21:03")
 
     def test_log_now_creates_manual_log_for_current_context(self) -> None:
         notion_service = MagicMock()
@@ -1377,7 +1368,7 @@ class NotionServiceTests(unittest.TestCase):
                 "properties": {
                     "Role": {"type": "select", "select": {"name": "CEO"}},
                     "Status": {"type": "checkbox", "checkbox": True},
-                    "Done date": {"type": "date", "date": {"start": "2026-04-10"}},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-10T13:15:00+02:00"}},
                     "Week": {"type": "select", "select": {"name": "26-W15"}},
                     "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Done today"}]},
                 },
@@ -1410,17 +1401,17 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual([task["id"] for task in completed], ["done-today"])
         self.assertEqual(active_week, "26-W15")
 
-    def test_query_log_tasks_falls_back_to_latest_week_and_legacy_done_tasks(self) -> None:
+    def test_query_log_tasks_uses_done_date_logical_day_and_latest_week(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         tasks = [
             {
-                "id": "done-no-date",
+                "id": "done-after-midnight",
                 "properties": {
                     "Role": {"type": "select", "select": {"name": "CEO"}},
                     "Status": {"type": "checkbox", "checkbox": True},
-                    "Done date": {"type": "date", "date": None},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-14T00:57:00+02:00"}},
                     "Week": {"type": "select", "select": {"name": "26-W16"}},
-                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Legacy done"}]},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Done just after midnight"}]},
                 },
             },
             {
@@ -1435,10 +1426,10 @@ class NotionServiceTests(unittest.TestCase):
             },
         ]
         with patch.object(service, "_query_all", return_value=tasks):
-            candidates, completed, active_week = service.query_log_tasks("CEO", "2026-04-12", "26-W15")
+            candidates, completed, active_week = service.query_log_tasks("CEO", "2026-04-13", "26-W15")
 
-        self.assertEqual([task["id"] for task in candidates], ["done-no-date", "todo-same-week"])
-        self.assertEqual([task["id"] for task in completed], ["done-no-date"])
+        self.assertEqual([task["id"] for task in candidates], ["done-after-midnight", "todo-same-week"])
+        self.assertEqual([task["id"] for task in completed], ["done-after-midnight"])
         self.assertEqual(active_week, "26-W16")
 
     def test_query_log_tasks_excludes_tasks_done_on_other_days(self) -> None:
@@ -1449,7 +1440,7 @@ class NotionServiceTests(unittest.TestCase):
                 "properties": {
                     "Role": {"type": "select", "select": {"name": "CEO"}},
                     "Status": {"type": "checkbox", "checkbox": True},
-                    "Done date": {"type": "date", "date": {"start": "2026-04-11"}},
+                    "Done date": {"type": "date", "date": {"start": "2026-04-11T23:40:00+02:00"}},
                     "Week": {"type": "select", "select": {"name": "26-W16"}},
                     "Description": {"type": "rich_text", "rich_text": [{"plain_text": "Done yesterday"}]},
                 },
@@ -1472,6 +1463,47 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(completed, [])
         self.assertEqual(active_week, "26-W16")
 
+    def test_query_log_tasks_includes_adam_style_after_midnight_tasks_in_previous_logical_day(self) -> None:
+        service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
+        tasks = [
+            {
+                "id": "task-0029",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "COO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-05-13T00:29:00+02:00"}},
+                    "Week": {"type": "select", "select": {"name": "26-W20"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "00:29"}]},
+                },
+            },
+            {
+                "id": "task-0057",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "COO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-05-13T00:57:00+02:00"}},
+                    "Week": {"type": "select", "select": {"name": "26-W20"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "00:57"}]},
+                },
+            },
+            {
+                "id": "task-0139",
+                "properties": {
+                    "Role": {"type": "select", "select": {"name": "COO"}},
+                    "Status": {"type": "checkbox", "checkbox": True},
+                    "Done date": {"type": "date", "date": {"start": "2026-05-13T01:39:00+02:00"}},
+                    "Week": {"type": "select", "select": {"name": "26-W20"}},
+                    "Description": {"type": "rich_text", "rich_text": [{"plain_text": "01:39"}]},
+                },
+            },
+        ]
+        with patch.object(service, "_query_all", return_value=tasks):
+            candidates, completed, active_week = service.query_log_tasks("COO", "2026-05-12", "26-W20")
+
+        self.assertEqual([task["id"] for task in candidates], ["task-0029", "task-0057", "task-0139"])
+        self.assertEqual([task["id"] for task in completed], ["task-0029", "task-0057", "task-0139"])
+        self.assertEqual(active_week, "26-W20")
+
     def test_set_task_completion_checkbox_clears_done_date(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         service.client = MagicMock()
@@ -1487,7 +1519,7 @@ class NotionServiceTests(unittest.TestCase):
             },
         }
 
-        service.set_task_completion(task, completed=False, today_iso="2026-04-10")
+        service.set_task_completion(task, completed=False)
 
         service.client.pages.update.assert_called_once_with(
             page_id="page-1",
@@ -1515,24 +1547,24 @@ class NotionServiceTests(unittest.TestCase):
             },
         }
 
-        service.set_task_completion(task, completed=True, today_iso="2026-05-07")
+        service.set_task_completion(task, completed=True, done_at_iso="2026-05-07T16:10:00+02:00")
 
         service.client.pages.update.assert_called_once_with(
             page_id="page-1",
             properties={
                 "Status": {"select": {"name": "Done"}},
                 "Done": {"checkbox": True},
-                "Done date": {"date": {"start": "2026-05-07"}},
+                "Done date": {"date": {"start": "2026-05-07T16:10:00+02:00"}},
             },
         )
 
-    def test_has_daily_log_matches_founder_and_date_prefix(self) -> None:
+    def test_has_daily_log_matches_founder_and_logical_day(self) -> None:
         service = notion.NotionService(token="token", tasks_db_id="tasks", daily_logs_db_id="daily", team_db_id="team")
         rows = [
             {
                 "properties": {
                     "Founder": {"type": "select", "select": {"name": "Oriol"}},
-                    "Date": {"type": "date", "date": {"start": "2026-04-12T01:20:00+02:00"}},
+                    "Logical Day": {"type": "date", "date": {"start": "2026-04-12"}},
                 }
             }
         ]
@@ -1547,7 +1579,7 @@ class NotionServiceTests(unittest.TestCase):
             {
                 "properties": {
                     "Title": {"type": "title", "title": [{"plain_text": "Oriol · 26-W19 · 2026-05-07"}]},
-                    "Date": {"type": "date", "date": {"start": "2026-05-07"}},
+                    "Logical Day": {"type": "date", "date": {"start": "2026-05-07"}},
                 }
             }
         ]
@@ -1563,7 +1595,8 @@ class NotionServiceTests(unittest.TestCase):
 
         schema = {
             "Title": {"type": "title"},
-            "Date": {"type": "date"},
+            "Logged At": {"type": "date"},
+            "Logical Day": {"type": "date"},
             "Created on": {"type": "date"},
             "Founder": {"type": "select"},
             "Role": {"type": "select"},
@@ -1587,7 +1620,8 @@ class NotionServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["properties"]["Founder"]["select"]["name"], "Oriol")
         self.assertEqual(kwargs["properties"]["Role"]["select"]["name"], "CEO")
         self.assertEqual(kwargs["properties"]["Week"]["select"]["name"], "26-W15")
-        self.assertEqual(kwargs["properties"]["Date"]["date"]["start"], "2026-04-10T21:03:00+02:00")
+        self.assertEqual(kwargs["properties"]["Logged At"]["date"]["start"], "2026-04-10T21:03:00+02:00")
+        self.assertEqual(kwargs["properties"]["Logical Day"]["date"]["start"], "2026-04-10")
         self.assertEqual(kwargs["properties"]["Created on"]["date"]["start"], "2026-04-10T21:03:00+02:00")
         self.assertEqual(kwargs["properties"]["Tasks completed"]["relation"], [{"id": "page-1"}, {"id": "page-2"}])
         self.assertEqual(kwargs["properties"]["Notes"]["rich_text"][0]["text"]["content"], "reflection")
@@ -1598,7 +1632,8 @@ class NotionServiceTests(unittest.TestCase):
         service.client.data_sources = None
         schema = {
             "Title": {"type": "title"},
-            "Date": {"type": "date"},
+            "Logged At": {"type": "date"},
+            "Logical Day": {"type": "date"},
             "Created on": {"type": "date"},
             "Tasks completed": {"type": "relation"},
             "Notes": {"type": "rich_text"},
@@ -1617,7 +1652,8 @@ class NotionServiceTests(unittest.TestCase):
 
         _, kwargs = service.client.pages.create.call_args
         self.assertEqual(kwargs["properties"]["Title"]["title"][0]["text"]["content"], "Oriol · 26-W19 · 2026-05-07")
-        self.assertEqual(kwargs["properties"]["Date"]["date"]["start"], "2026-05-07T01:12:00+02:00")
+        self.assertEqual(kwargs["properties"]["Logged At"]["date"]["start"], "2026-05-08T01:12:00+02:00")
+        self.assertEqual(kwargs["properties"]["Logical Day"]["date"]["start"], "2026-05-07")
         self.assertEqual(kwargs["properties"]["Created on"]["date"]["start"], "2026-05-08T01:12:00+02:00")
         self.assertNotIn("Founder", kwargs["properties"])
         self.assertNotIn("Role", kwargs["properties"])
@@ -1629,13 +1665,13 @@ class NotionServiceTests(unittest.TestCase):
             {
                 "properties": {
                     "Founder": {"type": "select", "select": {"name": "Oriol"}},
-                    "Date": {"type": "date", "date": {"start": "2026-04-28T23:00:00+02:00"}},
+                    "Logical Day": {"type": "date", "date": {"start": "2026-04-28"}},
                 }
             },
             {
                 "properties": {
                     "Founder": {"type": "select", "select": {"name": "Arnau"}},
-                    "Date": {"type": "date", "date": {"start": "2026-04-29"}},
+                    "Logical Day": {"type": "date", "date": {"start": "2026-04-29"}},
                 }
             },
         ]
@@ -1663,6 +1699,125 @@ class NotionServiceTests(unittest.TestCase):
                 "Best Streak": {"number": 12},
             },
         )
+
+
+class DailyLogDedupeTests(unittest.TestCase):
+    def test_preview_surfaces_four_duplicate_groups(self) -> None:
+        notion_service = MagicMock()
+        runtime = MagicMock(notion=notion_service)
+        service = DailyLogDedupeService(runtime)
+        rows = [
+            self._daily_log_row("adam-1", "Adam · 26-W20 · 2026-05-13", "2026-05-12", created_time="2026-05-13T00:40:00+02:00"),
+            self._daily_log_row("adam-2", "Adam · 26-W20 · 2026-05-12", "2026-05-12", created_time="2026-05-13T01:10:00+02:00"),
+            self._daily_log_row("oriol-1", "Oriol · 26-W20 · 2026-05-12", "2026-05-12", created_time="2026-05-12T20:00:00+02:00"),
+            self._daily_log_row("oriol-2", "Oriol · 26-W20 · 2026-05-12", "2026-05-12", created_time="2026-05-12T21:00:00+02:00"),
+            self._daily_log_row("arnau-1", "Arnau · 26-W20 · 2026-05-11", "2026-05-11", created_time="2026-05-11T20:00:00+02:00"),
+            self._daily_log_row("arnau-2", "Arnau · 26-W20 · 2026-05-11", "2026-05-11", created_time="2026-05-11T22:00:00+02:00"),
+            self._daily_log_row("oriol-3", "Oriol · 26-W19 · 2026-05-07", "2026-05-07", created_time="2026-05-07T20:00:00+02:00"),
+            self._daily_log_row("oriol-4", "Oriol · 26-W19 · 2026-05-07", "2026-05-07", created_time="2026-05-07T22:00:00+02:00"),
+        ]
+        self._stub_daily_log_helpers(notion_service, rows)
+
+        result = service.preview()
+
+        self.assertEqual(result["group_count"], 4)
+        self.assertEqual(
+            [(group["founder_name"], group["logical_day"]) for group in result["groups"]],
+            [
+                ("Oriol", "2026-05-07"),
+                ("Arnau", "2026-05-11"),
+                ("Adam", "2026-05-12"),
+                ("Oriol", "2026-05-12"),
+            ],
+        )
+
+    @patch("backend.services.daily_log_dedupe.sync_founder_streak_from_daily_logs", return_value=(3, 5, "2026-05-12"))
+    def test_apply_merges_adam_duplicate_on_logical_day(self, sync_streak: MagicMock) -> None:
+        notion_service = MagicMock()
+        runtime = MagicMock(notion=notion_service)
+        service = DailyLogDedupeService(runtime)
+        keeper = self._daily_log_row(
+            "adam-keeper",
+            "Adam · 26-W20 · 2026-05-13",
+            "2026-05-12",
+            logged_at="2026-05-13T00:57:00+02:00",
+            task_ids=["task-2", "task-1"],
+            notes="keeper note",
+            relation_ids=[],
+            created_time="2026-05-13T00:57:00+02:00",
+            week_code="26-W20",
+        )
+        loser = self._daily_log_row(
+            "adam-loser",
+            "Adam · 26-W20 · 2026-05-12",
+            "2026-05-12",
+            logged_at="2026-05-13T00:29:00+02:00",
+            task_ids=["task-2"],
+            notes="loser note",
+            relation_ids=["team-adam"],
+            created_time="2026-05-13T00:29:00+02:00",
+            week_code="26-W20",
+        )
+        rows = [keeper, loser]
+        self._stub_daily_log_helpers(notion_service, rows)
+        notion_service.lookup_team_member_id.return_value = "team-adam"
+
+        result = service.apply(founder="Adam", from_day="2026-05-12", to_day="2026-05-12")
+
+        notion_service.update_daily_log.assert_called_once()
+        update_kwargs = notion_service.update_daily_log.call_args.kwargs
+        self.assertEqual(notion_service.update_daily_log.call_args.args[0], "adam-keeper")
+        self.assertEqual(update_kwargs["title_text"], "Adam · 26-W20 · 2026-05-12")
+        self.assertEqual(update_kwargs["logical_day_iso"], "2026-05-12")
+        self.assertEqual(update_kwargs["logged_at_iso"], "2026-05-13T00:29:00+02:00")
+        self.assertEqual(update_kwargs["founder_relation_ids"], ["team-adam"])
+        self.assertEqual(update_kwargs["task_ids"], ["task-2", "task-1"])
+        self.assertIn("--- merged from duplicate ---", update_kwargs["notes_text"])
+        notion_service.archive_page.assert_called_once_with("adam-loser")
+        sync_streak.assert_called_once_with(notion_service, "Adam")
+        self.assertEqual(result["group_count"], 1)
+        self.assertEqual(result["groups"][0]["archived_ids"], ["adam-loser"])
+
+    def _stub_daily_log_helpers(self, notion_service: MagicMock, rows: list[dict[str, Any]]) -> None:
+        notion_service.get_all_daily_logs.return_value = rows
+        notion_service.daily_log_founder_name.side_effect = lambda row: row["meta"]["founder_name"]
+        notion_service.daily_log_logical_day_iso.side_effect = lambda row: row["meta"]["logical_day"]
+        notion_service.daily_log_title.side_effect = lambda row: row["meta"]["title"]
+        notion_service.daily_log_logged_at_iso.side_effect = lambda row: row["meta"]["logged_at"]
+        notion_service.daily_log_task_ids.side_effect = lambda row: row["meta"]["task_ids"]
+        notion_service.daily_log_notes_text.side_effect = lambda row: row["meta"]["notes"]
+        notion_service.daily_log_founder_relation_ids.side_effect = lambda row: row["meta"]["relation_ids"]
+        notion_service.daily_log_week_code.side_effect = lambda row: row["meta"]["week_code"]
+        notion_service.find_team_member.side_effect = lambda founder: {"name": founder}
+
+    def _daily_log_row(
+        self,
+        row_id: str,
+        title: str,
+        logical_day: str,
+        *,
+        logged_at: str | None = None,
+        task_ids: list[str] | None = None,
+        notes: str = "",
+        relation_ids: list[str] | None = None,
+        created_time: str,
+        week_code: str = "",
+    ) -> dict[str, Any]:
+        founder_name = title.split("·", 1)[0].strip()
+        return {
+            "id": row_id,
+            "created_time": created_time,
+            "meta": {
+                "title": title,
+                "founder_name": founder_name,
+                "logical_day": logical_day,
+                "logged_at": logged_at,
+                "task_ids": task_ids or [],
+                "notes": notes,
+                "relation_ids": relation_ids or [],
+                "week_code": week_code,
+            },
+        }
 
 
 if __name__ == "__main__":

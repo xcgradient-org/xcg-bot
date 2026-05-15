@@ -3,12 +3,12 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytz
 from notion_client import Client
 
+from backend.domain.dates import logical_day_iso_for_madrid
 from backend.domain.founders import FOUNDER_BY_ID
 
 
@@ -34,6 +34,8 @@ PROPERTY_ALIASES = {
     "Last Rollover Moved Count": ("Last Rollover Moved Count", "Rollover Moved Count", "Moved Count"),
     "Last Rollover Run": ("Last Rollover Run", "Rollover Run"),
     "Last Rollover Status": ("Last Rollover Status", "Rollover Status"),
+    "Logged At": ("Logged At", "Date", "When", "Log Date"),
+    "Logical Day": ("Logical Day", "Business Day", "Day", "Log Day"),
     "Location": ("Location", "Place", "Address"),
     "Month": ("Month",),
     "Notes": ("Notes", "Context", "Summary", "Overview", "TL;DR", "TLDR"),
@@ -61,6 +63,7 @@ class NotionService:
         self.settings_db_id = settings_db_id
         self._streaks_available = True
         self._team_member_cache: dict[str, str] = {}
+        self._team_member_name_cache: dict[str, str] = {}
 
     def verify_startup(self) -> None:
         try:
@@ -102,7 +105,6 @@ class NotionService:
         today_iso: str,
         week_code: str,
         founder_name: str | None = None,
-        extra_done_date_iso: str | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
         try:
             tasks = self._query_all(self.tasks_db_id)
@@ -123,28 +125,17 @@ class NotionService:
         done_today_ids = {
             task["id"]
             for task in role_tasks
-            if self._is_task_done(task) and (
-                self._date_matches_day(task, "Done date", today_iso)
-                or (extra_done_date_iso and self._date_matches_day(task, "Done date", extra_done_date_iso))
-            )
+            if self._is_task_done(task)
+            and self._task_done_logical_day(task) == today_iso
         }
         done_other_day_ids = {
             task["id"]
             for task in role_tasks
             if self._is_task_done(task)
-            and self._property_date(task, "Done date")
             and task["id"] not in done_today_ids
         }
         candidates = [task for task in candidates if task["id"] not in done_other_day_ids and not self._is_task_archived(task)]
-        legacy_done_ids: set[str] = set()
-        if not done_today_ids:
-            legacy_done_ids = {
-                task["id"]
-                for task in candidates
-                if self._is_task_done(task) and not self._property_date(task, "Done date")
-            }
-
-        completed_ids = done_today_ids or legacy_done_ids
+        completed_ids = done_today_ids
         extra_selected = [task for task in role_tasks if task["id"] in completed_ids and task not in candidates]
         if extra_selected:
             candidates = candidates + extra_selected
@@ -172,17 +163,19 @@ class NotionService:
     ) -> dict[str, Any]:
         schema = self._retrieve_schema(self.daily_logs_db_id)
         properties: dict[str, Any] = {}
-        business_day_timestamp = self._business_day_timestamp(today_iso, logged_at_iso)
+        effective_logged_at_iso = str(logged_at_iso or "").strip() or datetime.now(_MADRID_TZ).isoformat()
 
         title_name = self._title_property_name(schema)
         properties[title_name] = {"title": [{"type": "text", "text": {"content": f"{founder_name} · {week_code} · {today_iso}"}}]}
 
-        if prop := self._get_schema_property(schema, "Date"):
-            properties[self._property_name(prop, "Date")] = {"date": {"start": business_day_timestamp}}
+        if prop := self._get_schema_property(schema, "Logged At"):
+            properties[self._property_name(prop, "Logged At")] = {"date": {"start": effective_logged_at_iso}}
+
+        if prop := self._get_schema_property(schema, "Logical Day"):
+            properties[self._property_name(prop, "Logical Day")] = {"date": {"start": today_iso}}
 
         if prop := self._get_schema_property(schema, "Created on"):
-            timestamp = str(logged_at_iso or "").strip() or business_day_timestamp
-            properties[self._property_name(prop, "Created on")] = {"date": {"start": timestamp}}
+            properties[self._property_name(prop, "Created on")] = {"date": {"start": effective_logged_at_iso}}
 
         used_names = {title_name}
 
@@ -236,7 +229,7 @@ class NotionService:
             row
             for row in rows
             if self._daily_log_founder_value(row) == founder_name
-            and self._date_matches_day(row, "Date", today_iso)
+            and self._date_matches_day(row, "Logical Day", today_iso)
         ]
         if not matches:
             return None
@@ -253,7 +246,7 @@ class NotionService:
         for row in rows:
             if self._daily_log_founder_value(row) != founder_name:
                 continue
-            value = self._property_date(row, "Date")
+            value = self._property_date(row, "Logical Day")
             if not value:
                 continue
             dates.append(date.fromisoformat(value[:10]))
@@ -284,7 +277,6 @@ class NotionService:
         *,
         current_streak: int,
         best_streak: int | None,
-        last_log_iso: str | None = None,
     ) -> None:
         schema = self._retrieve_schema(self.team_db_id)
         properties: dict[str, Any] = {}
@@ -296,14 +288,16 @@ class NotionService:
             best_prop_name = self._existing_property_name(schema, "Best Streak") or "Best Streak"
             properties[best_prop_name] = {"number": best_streak}
 
-        if last_log_iso is not None:
-            last_log_prop_name = self._existing_property_name(schema, "Last Log") or "Last Log"
-            properties[last_log_prop_name] = {"date": {"start": last_log_iso}}
-
         try:
             self.client.pages.update(page_id=row_id, properties=properties)
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"Failed to update streak row {row_id}: {exc}") from exc
+
+    def get_all_daily_logs(self) -> list[dict[str, Any]]:
+        try:
+            return self._query_all(self.daily_logs_db_id)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to query daily logs: {exc}") from exc
 
     def task_descriptions(self, tasks: list[dict[str, Any]]) -> list[str]:
         descriptions: list[str] = []
@@ -348,8 +342,122 @@ class NotionService:
                 page_id = str(row.get("id") or "").strip()
                 if page_id:
                     self._team_member_cache[key] = page_id
+                    self._team_member_name_cache[page_id] = name
                     return page_id
         return None
+
+    def lookup_team_member_name(self, page_id: str) -> str | None:
+        key = str(page_id or "").strip()
+        if not key:
+            return None
+        if key in self._team_member_name_cache:
+            return self._team_member_name_cache[key]
+        try:
+            rows = self._query_all(self.team_db_id)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to query Team DB for member name lookup: %s", exc)
+            return None
+        for row in rows:
+            row_id = str(row.get("id") or "").strip()
+            if not row_id:
+                continue
+            name = self._page_title(row).strip()
+            if name:
+                self._team_member_name_cache[row_id] = name
+            if row_id == key:
+                return name or None
+        return None
+
+    def daily_log_logged_at_iso(self, row: dict[str, Any]) -> str | None:
+        value = self._property_date(row, "Logged At")
+        if value:
+            return value
+        created_time = str(row.get("created_time") or "").strip()
+        return created_time or None
+
+    def daily_log_logical_day_iso(self, row: dict[str, Any]) -> str:
+        value = self._property_date(row, "Logical Day")
+        return value[:10] if value else ""
+
+    def daily_log_task_ids(self, row: dict[str, Any]) -> list[str]:
+        return self._property_relation_ids(row, "Tasks completed")
+
+    def daily_log_notes_text(self, row: dict[str, Any]) -> str:
+        return self._property_text(row, "Notes")
+
+    def daily_log_title(self, row: dict[str, Any]) -> str:
+        return self._page_title(row)
+
+    def daily_log_week_code(self, row: dict[str, Any]) -> str:
+        week_value = self._property_text(row, "Week").strip()
+        if week_value:
+            return week_value
+        title = self._page_title(row)
+        parts = [part.strip() for part in title.split("·")]
+        return parts[1] if len(parts) >= 3 else ""
+
+    def daily_log_founder_relation_ids(self, row: dict[str, Any]) -> list[str]:
+        return self._property_relation_ids(row, "Founder")
+
+    def daily_log_founder_name(self, row: dict[str, Any]) -> str:
+        return self._daily_log_founder_value(row)
+
+    def update_daily_log(
+        self,
+        row_id: str,
+        *,
+        title_text: str | object = UNSET,
+        founder_name: str | object = UNSET,
+        founder_relation_ids: list[str] | object = UNSET,
+        logical_day_iso: str | object = UNSET,
+        logged_at_iso: str | None | object = UNSET,
+        task_ids: list[str] | object = UNSET,
+        notes_text: str | object = UNSET,
+    ) -> None:
+        schema = self._retrieve_schema(self.daily_logs_db_id)
+        properties: dict[str, Any] = {}
+
+        if title_text is not UNSET:
+            title_name = self._title_property_name(schema)
+            properties[title_name] = {"title": [{"type": "text", "text": {"content": str(title_text)}}]}
+
+        founder_prop_name = self._existing_property_name(schema, "Founder")
+        if founder_prop_name and (founder_relation_ids is not UNSET or founder_name is not UNSET):
+            founder_prop = schema[founder_prop_name]
+            if founder_prop.get("type") == "relation" and founder_relation_ids is not UNSET:
+                relation_ids = founder_relation_ids
+                properties[founder_prop_name] = {"relation": [{"id": page_id} for page_id in relation_ids]}
+            elif founder_prop.get("type") != "relation" and founder_name is not UNSET:
+                properties[founder_prop_name] = self._build_text_like_property_value(founder_prop, str(founder_name))
+
+        if logical_day_iso is not UNSET and (prop := self._get_schema_property(schema, "Logical Day")):
+            properties[self._property_name(prop, "Logical Day")] = {"date": {"start": str(logical_day_iso)}} if logical_day_iso else {"date": None}
+
+        if logged_at_iso is not UNSET and (prop := self._get_schema_property(schema, "Logged At")):
+            properties[self._property_name(prop, "Logged At")] = {"date": {"start": str(logged_at_iso)}} if logged_at_iso else {"date": None}
+
+        if task_ids is not UNSET:
+            tasks_prop_name = self._existing_property_name(schema, "Tasks completed")
+            if tasks_prop_name:
+                properties[tasks_prop_name] = {"relation": [{"id": page_id} for page_id in task_ids]}
+
+        if notes_text is not UNSET:
+            notes_prop_name = self._existing_property_name(schema, "Notes")
+            if notes_prop_name:
+                properties[notes_prop_name] = {"rich_text": self._rich_text(str(notes_text))}
+
+        if not properties:
+            return
+        try:
+            self.client.pages.update(page_id=row_id, properties=properties)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to update daily log {row_id}: {exc}") from exc
+
+    def archive_page(self, page_id: str) -> None:
+        try:
+            self.client.pages.update(page_id=page_id, archived=True)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Failed to archive page {page_id}: {exc}") from exc
 
     def find_team_member_by_role(self, role: str) -> dict[str, Any] | None:
         target_role = str(role or "").strip().upper()
@@ -495,9 +603,9 @@ class NotionService:
 
         return self.find_team_member_by_role(raw)
 
-    def set_task_completion(self, task: dict[str, Any], *, completed: bool, today_iso: str) -> None:
+    def set_task_completion(self, task: dict[str, Any], *, completed: bool, done_at_iso: str | None = None) -> None:
         db_schema = self._retrieve_schema(self.tasks_db_id)
-        properties = self._task_completion_properties(task, db_schema, completed=completed, today_iso=today_iso)
+        properties = self._task_completion_properties(task, db_schema, completed=completed, done_at_iso=done_at_iso)
         try:
             self.client.pages.update(page_id=task["id"], properties=properties)
         except Exception as exc:  # noqa: BLE001
@@ -520,7 +628,7 @@ class NotionService:
         db_schema: dict[str, Any],
         *,
         completed: bool,
-        today_iso: str,
+        done_at_iso: str | None = None,
     ) -> dict[str, Any]:
         status_prop = self._property(task, "Status")
         prop_type = status_prop.get("type")
@@ -546,7 +654,7 @@ class NotionService:
 
         done_date_prop_name = self._existing_property_name(db_schema, "Done date") or "Done date"
         if completed:
-            properties[done_date_prop_name] = {"date": {"start": today_iso}}
+            properties[done_date_prop_name] = {"date": {"start": str(done_at_iso or "").strip() or datetime.now(_MADRID_TZ).isoformat()}}
         else:
             properties[done_date_prop_name] = {"date": None}
 
@@ -865,6 +973,15 @@ class NotionService:
             return dt.astimezone(_MADRID_TZ).date().isoformat() == day_iso
         except ValueError:
             return value.startswith(day_iso)
+
+    def _task_done_logical_day(self, task: dict[str, Any]) -> str | None:
+        value = self._property_date(task, "Done date")
+        if not value:
+            return None
+        try:
+            return logical_day_iso_for_madrid(value)
+        except ValueError:
+            return value[:10] or None
 
     def _resolve_active_week(self, tasks: list[dict[str, Any]], *, preferred_week: str) -> str:
         week_codes = {self._task_week_value(task) for task in tasks if self._task_week_value(task)}
@@ -1275,7 +1392,12 @@ class NotionService:
 
     def _daily_log_founder_value(self, row: dict[str, Any]) -> str:
         prop = self._property(row, "Founder")
-        if prop.get("type") != "relation":
+        if prop.get("type") == "relation":
+            for relation_id in self._property_relation_ids(row, "Founder"):
+                explicit = self.lookup_team_member_name(relation_id)
+                if explicit:
+                    return explicit
+        else:
             explicit = self._property_text(row, "Founder")
             if explicit:
                 return explicit
@@ -1289,20 +1411,6 @@ class NotionService:
         now = datetime.now()
         iso_year, iso_week, _ = now.isocalendar()
         return f"{iso_year % 100:02d}-W{iso_week:02d}"
-
-    def _business_day_timestamp(self, business_day_iso: str, logged_at_iso: str | None) -> str:
-        raw = str(logged_at_iso or "").strip()
-        if not raw:
-            return business_day_iso
-        normalized = raw.replace("Z", "+00:00")
-        try:
-            logged_at = datetime.fromisoformat(normalized)
-        except ValueError:
-            return business_day_iso
-        business_day = date.fromisoformat(business_day_iso)
-        if logged_at.tzinfo is None:
-            return datetime.combine(business_day, logged_at.time()).isoformat(timespec="seconds")
-        return datetime.combine(business_day, logged_at.timetz()).isoformat(timespec="seconds")
 
     def get_current_week_from_settings(self) -> str:
         if not self.settings_db_id:

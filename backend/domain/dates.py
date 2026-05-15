@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytz
 
 
 MADRID_TZ = pytz.timezone("Europe/Madrid")
+LOGICAL_DAY_CUTOFF_HOUR = 5
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 MONTHS = [
     "January", "February", "March", "April", "May", "June",
@@ -80,6 +81,34 @@ def normalize_date_iso(value: str) -> str:
     else:
         parsed = parsed.astimezone(MADRID_TZ)
     return parsed.isoformat()
+
+
+def madrid_datetime(value: str | datetime) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value or "").strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        return MADRID_TZ.localize(parsed)
+    return parsed.astimezone(MADRID_TZ)
+
+
+def logical_day_for_madrid(value: str | datetime) -> date:
+    if isinstance(value, str):
+        raw = value.strip()
+        if len(raw) <= 10:
+            return date.fromisoformat(raw[:10])
+    parsed = madrid_datetime(value)
+    if parsed.hour < LOGICAL_DAY_CUTOFF_HOUR:
+        parsed -= timedelta(days=1)
+    return parsed.date()
+
+
+def logical_day_iso_for_madrid(value: str | datetime) -> str:
+    return logical_day_for_madrid(value).isoformat()
 
 
 def format_datetime_label(date_iso: str) -> str:

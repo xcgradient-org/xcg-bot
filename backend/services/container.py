@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from backend.services.daily_log_dedupe import DailyLogDedupeService
 from backend.services.logs import LogsService
 from backend.services.meetings import MeetingsService
 from backend.services.okrs import OKRsService
@@ -24,6 +25,7 @@ class InternalServices:
     meetings: MeetingsService
     team_usage: TeamUsageService
     streaks: StreaksService
+    daily_log_dedupe: DailyLogDedupeService
 
 
 def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
@@ -38,4 +40,5 @@ def build_services(runtime: InternalRuntime | None = None) -> InternalServices:
         meetings=MeetingsService(active_runtime),
         team_usage=TeamUsageService(),
         streaks=StreaksService(active_runtime),
+        daily_log_dedupe=DailyLogDedupeService(active_runtime),
     )

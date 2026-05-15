@@ -1,4 +1,5 @@
 from .container import InternalServices, build_services
+from .daily_log_dedupe import DailyLogDedupeService
 from .internal_tools import InternalNotionApp, InternalToolsService
 from .logs import LogsService
 from .meetings import MeetingsService
@@ -34,6 +35,7 @@ __all__ = [
     "build_services",
     "compute_streak_from_log_dates",
     "compute_updated_streak",
+    "DailyLogDedupeService",
     "daily_reset_loop",
     "reset_stale_streaks",
     "seconds_until_next_reset",

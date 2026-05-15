@@ -8,6 +8,7 @@ from typing import Any
 import discord
 from discord import app_commands
 
+from backend.domain.dates import logical_day_for_madrid
 from backend.services.streaks import MADRID_TZ, sync_founder_streak_from_daily_logs
 
 
@@ -45,8 +46,8 @@ def _effective_log_datetime(now: datetime | None = None) -> datetime:
         current = MADRID_TZ.localize(current)
     else:
         current = current.astimezone(MADRID_TZ)
-    if current.hour < 5:
-        current = current - timedelta(days=1)
+    if logical_day_for_madrid(current) != current.date():
+        return current - timedelta(days=1)
     return current
 
 
@@ -206,6 +207,7 @@ def _complete_log_sync(
     ctx = state.ctx
     original_ids = {task["id"] for task in state.completed_tasks}
     selected_ids = {task["id"] for task in task_pages}
+    done_at_iso = datetime.now(MADRID_TZ).isoformat()
 
     for task in state.candidate_tasks:
         was_completed = task["id"] in original_ids
@@ -215,7 +217,7 @@ def _complete_log_sync(
         state.notion.set_task_completion(
             task,
             completed=should_be_completed,
-            today_iso=ctx.today_iso,
+            done_at_iso=done_at_iso,
         )
 
     task_descriptions = state.notion.task_descriptions(task_pages)
@@ -245,16 +247,6 @@ def _complete_log_sync(
         completed_task_ids=state.notion.page_ids(task_pages),
         notes_text=reflection_text,
     )
-
-    extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
-    if extra_done:
-        for task in task_pages:
-            done_date = state.notion._property_date(task, "Done date")  # noqa: SLF001
-            if done_date and done_date.startswith(extra_done):
-                try:
-                    state.notion.update_task_done_date(task, ctx.today_iso)
-                except Exception as exc:  # noqa: BLE001
-                    LOGGER.warning("Failed to backdate Done date for task %s: %s", task["id"], exc)
 
     new_current: int | None = None
     if not hasattr(state.notion, "streaks_available") or state.notion.streaks_available():
@@ -549,14 +541,12 @@ def register_log_command(bot, tree: app_commands.CommandTree, notion, reflection
                     ephemeral=True,
                 )
                 return
-            extra_done = ctx.calendar_date_iso if ctx.calendar_date_iso != ctx.today_iso else None
             candidate_tasks, completed_tasks, active_week = await asyncio.to_thread(
                 notion.query_log_tasks,
                 founder["role"],
                 ctx.today_iso,
                 ctx.week_code,
                 founder["name"],
-                extra_done,
             )
             ctx.week_code = active_week
         except Exception as exc:  # noqa: BLE001

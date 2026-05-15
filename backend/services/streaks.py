@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
 
@@ -13,22 +12,6 @@ import pytz
 LOGGER = logging.getLogger("xcg_bot.streaks")
 MADRID_TZ = pytz.timezone("Europe/Madrid")
 RESET_TIME = time(5, 0)
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-MAINTENANCE_STAMP_PATH = _PROJECT_ROOT / "maintenance_last_run.stamp"
-
-
-def maintenance_ran_today(stamp_path: Path, today: date) -> bool:
-    try:
-        return stamp_path.read_text(encoding="utf-8").strip() == today.isoformat()
-    except OSError:
-        return False
-
-
-def _write_maintenance_stamp(stamp_path: Path, today: date) -> None:
-    try:
-        stamp_path.write_text(today.isoformat(), encoding="utf-8")
-    except OSError as exc:
-        LOGGER.warning("Could not write maintenance stamp: %s", exc)
 
 
 def compute_updated_streak(last_log_iso: str, current_streak: int, best_streak: int, today: date) -> tuple[int, int]:
@@ -105,7 +88,6 @@ def sync_founder_streak_from_daily_logs(notion, founder_name: str, today: date |
             row["id"],
             current_streak=new_current,
             best_streak=new_best,
-            last_log_iso=new_last_log_iso,
         )
         LOGGER.info("Synced streak for %s from Daily Logs: current=%s best=%s last_log=%s.", founder_name, new_current, new_best, new_last_log_iso)
     return new_current, new_best, new_last_log_iso
@@ -147,7 +129,6 @@ async def auto_create_missing_daily_logs(notion, reflection, now: datetime | Non
                 today_iso=target_iso,
                 week_code=week_code,
                 logged_at_iso=local_now.isoformat(),
-                extra_done_date_iso=local_now.date().isoformat(),
             )
             result["founder_name"] = founder_name
             results.append(result)
@@ -158,10 +139,9 @@ async def auto_create_missing_daily_logs(notion, reflection, now: datetime | Non
     return results
 
 
-async def run_daily_maintenance(notion, reflection, stamp_path: Path = MAINTENANCE_STAMP_PATH) -> None:
+async def run_daily_maintenance(notion, reflection) -> None:
     await auto_create_missing_daily_logs(notion, reflection)
     await sync_streaks_from_daily_logs(notion)
-    _write_maintenance_stamp(stamp_path, datetime.now(MADRID_TZ).date())
 
 
 def should_run_startup_reset(now: datetime) -> bool:
@@ -177,14 +157,12 @@ def seconds_until_next_reset(now: datetime) -> float:
     return max((next_run - local_now).total_seconds(), 0.0)
 
 
-async def daily_reset_loop(
-    notion, reflection, stamp_path: Path = MAINTENANCE_STAMP_PATH
-) -> None:
+async def daily_reset_loop(notion, reflection) -> None:
     current = datetime.now(MADRID_TZ)
-    if should_run_startup_reset(current) and not maintenance_ran_today(stamp_path, current.date()):
+    if should_run_startup_reset(current):
         try:
             LOGGER.info("Running startup Notion maintenance fallback.")
-            await run_daily_maintenance(notion, reflection, stamp_path=stamp_path)
+            await run_daily_maintenance(notion, reflection)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -195,7 +173,7 @@ async def daily_reset_loop(
         LOGGER.info("Next streak reset scheduled in %.0f seconds.", wait_seconds)
         await asyncio.sleep(wait_seconds)
         try:
-            await run_daily_maintenance(notion, reflection, stamp_path=stamp_path)
+            await run_daily_maintenance(notion, reflection)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
