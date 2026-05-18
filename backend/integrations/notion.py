@@ -35,7 +35,7 @@ PROPERTY_ALIASES = {
     "Last Rollover Run": ("Last Rollover Run", "Rollover Run"),
     "Last Rollover Status": ("Last Rollover Status", "Rollover Status"),
     "Logged At": ("Logged At", "Date", "When", "Log Date"),
-    "Logical Day": ("Logical Day", "Business Day", "Day", "Log Day"),
+    "Logical Day": ("Logical Day", "Logical Day 1", "Business Day", "Day", "Log Day"),
     "Location": ("Location", "Place", "Address"),
     "Month": ("Month",),
     "Notes": ("Notes", "Context", "Summary", "Overview", "TL;DR", "TLDR"),
@@ -81,6 +81,28 @@ class NotionService:
             LOGGER.warning("Team database is unavailable; streak maintenance is disabled: %s", exc)
         else:
             self._streaks_available = True
+
+        self._warn_on_schema_drift()
+
+    def _warn_on_schema_drift(self) -> None:
+        expectations: list[tuple[str, str, tuple[str, ...]]] = [
+            (self.daily_logs_db_id, "Daily Logs", ("Logical Day", "Logged At", "Founder", "Tasks completed", "Notes")),
+            (self.team_db_id, "Team", ("Current Streak", "Best Streak", "Last Log")),
+        ]
+        for db_id, label, required in expectations:
+            try:
+                schema = self._retrieve_schema(db_id)
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Schema-drift check skipped for %s DB: %s", label, exc)
+                continue
+            missing = [prop for prop in required if self._existing_property_name(schema, prop) is None]
+            if missing:
+                LOGGER.warning(
+                    "Schema drift in %s DB: aliases for %s do not resolve to any column. "
+                    "Add the actual Notion property name to PROPERTY_ALIASES.",
+                    label,
+                    ", ".join(repr(name) for name in missing),
+                )
 
     def streaks_available(self) -> bool:
         return self._streaks_available
@@ -277,6 +299,7 @@ class NotionService:
         *,
         current_streak: int,
         best_streak: int | None,
+        last_log_iso: str | None = None,
     ) -> None:
         schema = self._retrieve_schema(self.team_db_id)
         properties: dict[str, Any] = {}
@@ -287,6 +310,14 @@ class NotionService:
         if best_streak is not None:
             best_prop_name = self._existing_property_name(schema, "Best Streak") or "Best Streak"
             properties[best_prop_name] = {"number": best_streak}
+
+        last_log_prop_name = self._existing_property_name(schema, "Last Log")
+        if last_log_prop_name:
+            last_log_type = schema[last_log_prop_name].get("type")
+            if last_log_type == "date":
+                properties[last_log_prop_name] = (
+                    {"date": {"start": last_log_iso}} if last_log_iso else {"date": None}
+                )
 
         try:
             self.client.pages.update(page_id=row_id, properties=properties)

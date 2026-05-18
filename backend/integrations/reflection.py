@@ -192,7 +192,13 @@ class ReflectionService:
                             LOGGER.warning("LLM key #%s is invalid; skipping this key for JSON synthesis.", key_idx + 1)
                             continue
                         if self._is_json_validation_error(exc):
-                            raise RuntimeError(f"Non-retriable JSON validation failure with key #{key_idx + 1}: {exc}") from exc
+                            LOGGER.warning(
+                                "LLM JSON validation failed with key #%s model=%s; trying next model/key: %s",
+                                key_idx + 1,
+                                model,
+                                exc,
+                            )
+                            continue
                         LOGGER.warning("LLM failed with key #%s model=%s: %s", key_idx + 1, model, exc)
             raise RuntimeError("All configured LLM key/model combinations failed: " + " | ".join(errors))
 

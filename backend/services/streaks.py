@@ -88,6 +88,7 @@ def sync_founder_streak_from_daily_logs(notion, founder_name: str, today: date |
             row["id"],
             current_streak=new_current,
             best_streak=new_best,
+            last_log_iso=new_last_log_iso,
         )
         LOGGER.info("Synced streak for %s from Daily Logs: current=%s best=%s last_log=%s.", founder_name, new_current, new_best, new_last_log_iso)
     return new_current, new_best, new_last_log_iso

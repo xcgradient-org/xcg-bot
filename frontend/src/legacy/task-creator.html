@@ -1054,6 +1054,16 @@ function isoWeekParts(date) {
 function fmtWeekCode({ year, week }) {
   return `${String(year).slice(-2)}-W${String(week).padStart(2, "0")}`;
 }
+function isoWeeksInYear(year) {
+  return isoWeekParts(new Date(Date.UTC(year, 11, 28))).week;
+}
+function parseWeekCode(s) {
+  const match = /^(\d{2})-W(\d{2})$/i.exec((s || "").trim());
+  if (!match) return null;
+  const year = 2000 + Number(match[1]);
+  const week = Number(match[2]);
+  return { year, week, maxWeek: isoWeeksInYear(year) };
+}
 function nextWeekCode(from = new Date()) {
   const d = new Date(from);
   d.setDate(d.getDate() + 7);
@@ -1068,7 +1078,8 @@ function thisWeekCode(from = new Date()) {
   return fmtWeekCode(isoWeekParts(from));
 }
 function isValidWeekCode(s) {
-  return /^\d{2}-W\d{2}$/i.test((s || "").trim());
+  const parsed = parseWeekCode(s);
+  return Boolean(parsed && parsed.week >= 1 && parsed.week <= parsed.maxWeek);
 }
 
 /* ============================================================
@@ -1173,9 +1184,12 @@ function updateWeekHint(isDefault) {
   const text = $("#weekHintText");
   const v = state.weekCode;
   if (!isValidWeekCode(v)) {
+    const parsed = parseWeekCode(v);
     hint.classList.add("is-warn");
     hint.querySelector(".badge").textContent = "Invalid";
-    text.textContent = "Use YY-WNN, e.g. 26-W21.";
+    text.textContent = parsed
+      ? `Week must be between 01 and ${String(parsed.maxWeek).padStart(2, "0")} for ${parsed.year}.`
+      : "Use YY-WNN, e.g. 26-W21.";
   } else if (isDefault || v === state.thisWeekCode) {
     hint.classList.remove("is-warn");
     hint.querySelector(".badge").textContent = "Current";
@@ -1288,6 +1302,15 @@ function clientParse(text) {
     .map(l => /[.!?…]$/.test(l) ? l : l + ".");
 }
 
+async function apiErrorMessage(response, fallback) {
+  try {
+    const payload = await response.json();
+    return payload.detail || payload.error || fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
 async function parseTasks() {
   const btn = $("#parseBtn");
   const label = $("#parseLabel");
@@ -1309,7 +1332,7 @@ async function parseTasks() {
       }),
       signal: AbortSignal.timeout(25000)
     });
-    if (!r.ok) throw new Error("non-200");
+    if (!r.ok) throw new Error(await apiErrorMessage(r, `Parse request failed with ${r.status}`));
     const data = await r.json();
     if (!Array.isArray(data.descriptions) || !data.descriptions.length) throw new Error("empty");
     descriptions = data.descriptions;
@@ -1363,7 +1386,7 @@ async function previewIds(count) {
       }),
       signal: AbortSignal.timeout(15000)
     });
-    if (!r.ok) throw new Error("non-200");
+    if (!r.ok) throw new Error(await apiErrorMessage(r, `ID preview failed with ${r.status}`));
     const data = await r.json();
     if (!Array.isArray(data.ids) || data.ids.length !== count) throw new Error("bad");
     state.online.ids = true;
@@ -1488,7 +1511,7 @@ async function pushTasks() {
       signal: AbortSignal.timeout(120000)
     });
     const payload = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(payload.error || `Request failed with ${r.status}`);
+    if (!r.ok) throw new Error(payload.detail || payload.error || `Request failed with ${r.status}`);
     result = payload;
     state.online.push = true;
   } catch (e) {
@@ -1582,6 +1605,7 @@ loadProjects();
 
 // expose for inline onclicks
 window.setPhase = setPhase;
+window.pushTasks = pushTasks;
 </script>
 </body>
 </html>

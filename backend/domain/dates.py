@@ -32,12 +32,15 @@ TIME_RANGE_RE = re.compile(
 
 
 def week_parts(week_code: str) -> tuple[int, int]:
-    match = re.match(r"^(\d{2})-W(\d{1,2})$", str(week_code or "").strip(), flags=re.IGNORECASE)
+    match = re.match(r"^(\d{2})-W(\d{2})$", str(week_code or "").strip(), flags=re.IGNORECASE)
     if not match:
-        now = datetime.now(MADRID_TZ)
-        iso_year, iso_week, _ = now.isocalendar()
-        return iso_year, iso_week
-    return 2000 + int(match.group(1)), int(match.group(2))
+        raise ValueError("Invalid week code. Use YY-WNN, e.g. 26-W05.")
+    year = 2000 + int(match.group(1))
+    week = int(match.group(2))
+    max_week = date(year, 12, 28).isocalendar()[1]
+    if week < 1 or week > max_week:
+        raise ValueError(f"Invalid ISO week {week:02d} for {year}.")
+    return year, week
 
 
 def month_name() -> str:

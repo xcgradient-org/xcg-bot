@@ -334,20 +334,23 @@ class ReflectionServiceTests(unittest.TestCase):
                 service._model_request(system_prompt="s", user_prompt="u")
         openai_request.assert_called_once()
 
-    def test_model_request_fails_fast_on_non_retriable_json_validation_error(self) -> None:
+    def test_model_request_retries_json_validation_error(self) -> None:
         service = reflection.ReflectionService(model="openai/gpt-oss-20b", api_keys=("key-1", "key-2"))
         with patch.object(
             service,
             "_openai_request",
-            side_effect=RuntimeError('LLM request failed: 400 {"error":{"code":"json_validate_failed"}}'),
+            side_effect=[
+                RuntimeError('LLM request failed: 400 {"error":{"code":"json_validate_failed"}}'),
+                {"choices": [{"message": {"content": "{\"ok\": true}"}}]},
+            ],
         ) as openai_request:
-            with self.assertRaisesRegex(RuntimeError, "Non-retriable JSON validation failure"):
-                service._model_request(
-                    system_prompt="s",
-                    user_prompt="u",
-                    response_mime_type="application/json",
-                )
-        openai_request.assert_called_once()
+            payload = service._model_request(
+                system_prompt="s",
+                user_prompt="u",
+                response_mime_type="application/json",
+            )
+        self.assertEqual(payload, {"choices": [{"message": {"content": "{\"ok\": true}"}}]})
+        self.assertEqual(openai_request.call_count, 2)
 
     def test_build_fallback_reflection_includes_tasks_and_notes(self) -> None:
         service = reflection.ReflectionService(model="openai/gpt-oss-20b")
@@ -657,6 +660,19 @@ class BlockersTests(unittest.TestCase):
 
 
 class InternalMeetingCreatorTests(unittest.TestCase):
+    def test_week_parts_accepts_valid_iso_week(self) -> None:
+        year, week = internal_server._week_parts("26-W53")
+
+        self.assertEqual((year, week), (2026, 53))
+
+    def test_week_parts_rejects_out_of_range_iso_week(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Invalid ISO week"):
+            internal_server._week_parts("26-W99")
+
+    def test_week_parts_rejects_loose_week_format(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Invalid week code"):
+            internal_server._week_parts("26-W5")
+
     def test_week_context_for_date_uses_meeting_week(self) -> None:
         year, week, week_code, quarter_name = internal_server._week_context_for_date("2026-05-12T10:00:00+02:00")
 
@@ -1773,6 +1789,137 @@ class ClaudeOAuthProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["status"], "token_expired")
         http_get.assert_not_called()
+
+
+class LogicalDayAliasDriftTests(unittest.TestCase):
+    """Regression tests for the Notion 'Logical Day 1' column drift.
+
+    Daily Logs DB was migrated and Notion auto-renamed the date column from
+    'Logical Day' to 'Logical Day 1'. The alias map did not cover the new
+    name, so both writes and reads silently no-oped: every founder's
+    Current Streak was overwritten with 0 after each daily-log submission.
+    """
+
+    def _build_service(self) -> notion.NotionService:
+        with patch("backend.integrations.notion.Client"):
+            return notion.NotionService(
+                token="test-token",
+                tasks_db_id="tasks-db",
+                daily_logs_db_id="daily-logs-db",
+                team_db_id="team-db",
+            )
+
+    def test_daily_log_dates_returns_dates_when_column_is_logical_day_1(self) -> None:
+        service = self._build_service()
+        row = {
+            "id": "page-1",
+            "created_time": "2026-05-15T20:00:00.000Z",
+            "properties": {
+                "Title": {
+                    "type": "title",
+                    "title": [{"plain_text": "Oriol · 26-W20 · 2026-05-15"}],
+                },
+                "Founder": {"type": "relation", "relation": [{"id": "team-oriol"}]},
+                "Logical Day 1": {"type": "date", "date": {"start": "2026-05-15"}},
+            },
+        }
+        service._query_all = MagicMock(return_value=[row])
+        service.lookup_team_member_name = MagicMock(return_value="Oriol")
+
+        result = service.daily_log_dates("Oriol")
+
+        self.assertEqual(result, [date(2026, 5, 15)])
+
+    def test_create_daily_log_writes_to_logical_day_1_column(self) -> None:
+        service = self._build_service()
+        schema = {
+            "Title": {"type": "title", "name": "Title"},
+            "Founder": {"type": "relation", "name": "Founder"},
+            "Logged At": {"type": "date", "name": "Logged At"},
+            "Logical Day 1": {"type": "date", "name": "Logical Day 1"},
+            "Tasks completed": {"type": "relation", "name": "Tasks completed"},
+            "Notes": {"type": "rich_text", "name": "Notes"},
+        }
+        service._retrieve_schema = MagicMock(return_value=schema)
+        service._build_parent = MagicMock(return_value={"database_id": "daily-logs-db"})
+        service.lookup_team_member_id = MagicMock(return_value=None)
+
+        pages_create = MagicMock(return_value={"id": "new-page"})
+        service.client.pages.create = pages_create
+
+        service.create_daily_log(
+            founder_name="Oriol",
+            founder_role="CEO",
+            week_code="26-W20",
+            today_iso="2026-05-15",
+            logged_at_iso="2026-05-15T20:00:00+02:00",
+            completed_task_ids=[],
+            notes_text="hello",
+        )
+
+        props = pages_create.call_args.kwargs["properties"]
+        self.assertIn("Logical Day 1", props)
+        self.assertEqual(props["Logical Day 1"], {"date": {"start": "2026-05-15"}})
+
+    def test_sync_founder_streak_passes_last_log_iso_to_update(self) -> None:
+        notion_mock = MagicMock()
+        notion_mock.get_streak_row.return_value = {"id": "team-oriol"}
+        notion_mock.streak_values.return_value = (0, 0, None)
+        notion_mock.daily_log_dates.return_value = [date(2026, 5, 17)]
+
+        streaks.sync_founder_streak_from_daily_logs(
+            notion_mock, "Oriol", today=date(2026, 5, 17)
+        )
+
+        notion_mock.update_streak_row.assert_called_once()
+        call_kwargs = notion_mock.update_streak_row.call_args.kwargs
+        self.assertEqual(call_kwargs.get("last_log_iso"), "2026-05-17")
+
+    def test_update_streak_row_skips_rollup_last_log(self) -> None:
+        service = self._build_service()
+        schema = {
+            "Name": {"type": "title", "name": "Name"},
+            "Current Streak": {"type": "number", "name": "Current Streak"},
+            "Best Streak": {"type": "number", "name": "Best Streak"},
+            "Last Log": {"type": "rollup", "name": "Last Log"},
+        }
+        service._retrieve_schema = MagicMock(return_value=schema)
+        pages_update = MagicMock(return_value={"id": "team-oriol"})
+        service.client.pages.update = pages_update
+
+        service.update_streak_row(
+            "team-oriol",
+            current_streak=3,
+            best_streak=7,
+            last_log_iso="2026-05-17",
+        )
+
+        props = pages_update.call_args.kwargs["properties"]
+        self.assertIn("Current Streak", props)
+        self.assertIn("Best Streak", props)
+        self.assertNotIn("Last Log", props)
+
+    def test_update_streak_row_writes_date_last_log(self) -> None:
+        service = self._build_service()
+        schema = {
+            "Name": {"type": "title", "name": "Name"},
+            "Current Streak": {"type": "number", "name": "Current Streak"},
+            "Best Streak": {"type": "number", "name": "Best Streak"},
+            "Last Log": {"type": "date", "name": "Last Log"},
+        }
+        service._retrieve_schema = MagicMock(return_value=schema)
+        pages_update = MagicMock(return_value={"id": "team-oriol"})
+        service.client.pages.update = pages_update
+
+        service.update_streak_row(
+            "team-oriol",
+            current_streak=3,
+            best_streak=7,
+            last_log_iso="2026-05-17",
+        )
+
+        props = pages_update.call_args.kwargs["properties"]
+        self.assertEqual(props["Last Log"], {"date": {"start": "2026-05-17"}})
 
 
 if __name__ == "__main__":
