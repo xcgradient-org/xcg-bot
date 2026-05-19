@@ -112,12 +112,8 @@ class MeetingsService:
         month_name = month_name_for_date(meeting["date_iso"])
         today_iso = datetime.now(MADRID_TZ).date().isoformat()
         description = finalize_sentence(f"Attend {meeting['title']} on {meeting['date_label']}")
-        is_current_week = False
-        try:
-            is_current_week = self.runtime.notion._week_matches(week_code, self.runtime.notion.resolve_current_week())
-        except Exception as exc:  # noqa: BLE001
-            from backend.services.runtime import LOGGER
-            LOGGER.warning("Could not resolve current week for meeting attendance tasks; leaving false: %s", exc)
+        _, _, today_week_code, _ = week_context_for_date(datetime.now(MADRID_TZ).isoformat())
+        is_current_week = self.runtime.notion._week_matches(week_code, today_week_code)
 
         created_pages: list[dict[str, Any]] = []
         seen_roles: set[str] = set()

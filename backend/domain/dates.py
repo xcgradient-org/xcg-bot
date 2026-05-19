@@ -282,7 +282,7 @@ def normalize_meeting_payload(raw_input: dict[str, Any], ai_payload: dict[str, A
 
     title = str(payload.get("title") or raw_input.get("title") or "").strip()
     meeting_type = str(payload.get("type") or raw_input.get("type") or "Other").strip()
-    attendees = normalize_attendees(payload.get("attendees") if payload.get("attendees") else raw_input.get("attendees"))
+    attendees = normalize_attendees(raw_input.get("attendees") if raw_input.get("attendees") else payload.get("attendees"))
     location = str(payload.get("location") or raw_input.get("location") or "").strip()
     notes = str(payload.get("notes_enhanced") or raw_input.get("notes") or "").strip()
     meeting_link = str(raw_input.get("meeting_link") or "").strip()
