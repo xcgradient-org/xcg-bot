@@ -497,7 +497,8 @@ function renderGroupCard(slide, group, theme, rect, x, y, w, h) {
       margin: 0,
     });
   }
-  if (group.detail) {
+  const taskAreaBottom = taskY + Math.min(tasks.length, 5) * taskLineHeight;
+  if (group.detail && taskAreaBottom + 0.04 < y + h - 0.28) {
     slide.addText(group.detail, {
       x: x + 0.16,
       y: y + h - 0.28,
@@ -576,7 +577,7 @@ function renderSectionPage(slide, page, theme, rect) {
     drawBars(slide, page.chart, theme, rect, rightX, contentY, 3.1, 2.2);
   }
 
-  if (Array.isArray(page.highlights) && page.highlights.length) {
+  if (page.chart && Array.isArray(page.highlights) && page.highlights.length) {
     renderBullets(slide, page.highlights, theme, rightX, 3.95, 3.05, 1.0);
   }
 }
@@ -585,13 +586,14 @@ function renderCoverPage(slide, page, theme, rect) {
   slide.addText(page.headline || "Week report", {
     x: 0.65,
     y: 0.45,
-    w: 7.4,
+    w: 5.5,
     h: 0.72,
     fontFace: theme.fonts.heading,
     fontSize: 36,
     color: theme.colors.black,
     bold: true,
     margin: 0,
+    fit: "shrink",
   });
   slide.addText(page.subtitle || "", {
     x: 0.65,
