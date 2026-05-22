@@ -492,7 +492,7 @@ function renderGroupCard(slide, group, theme, rect, x, y, w, h) {
       h: taskLineHeight,
       fontFace: theme.fonts.body,
       fontSize: 9,
-      color: theme.colors.grayMid,
+      color: theme.colors.gray,
       italic: true,
       margin: 0,
     });
