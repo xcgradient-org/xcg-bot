@@ -112,10 +112,13 @@ MEETING_PARSE_PROMPT = (
 WEEK_PWP_COMPLETED_ANALYSIS_PROMPT = (
     "You are preparing the completed-work section of a weekly PowerPoint report for XC Gradient. "
     "Return valid JSON with exactly these keys: summary, headline, chart, groups, insights. "
-    "summary must be 1-2 concise sentences. headline must be a short slide headline. "
+    "summary must be 1-2 concise sentences that synthesize a specific insight or outcome from this week's work — "
+    "do NOT restate the group titles or list themes; give a real takeaway. "
+    "headline must be a short slide headline. "
     "chart must be an object with title, labels, values, and note. labels and values must align with the groups array order. "
     "groups must be an array of 2-5 objects with keys title, summary, tasks, and impact. "
-    "tasks must contain only the provided completed task descriptions, lightly cleaned. "
+    "tasks must contain EVERY task from the input list, distributed across groups — do not omit any task. "
+    "Each task must appear in exactly one group. "
     "Task descriptions may be prefixed with '⚠ stale | ' or '↩ carryover | ' — strip these prefixes before using the task text. "
     "Group titles must be descriptive business themes of 2-4 words (e.g. 'Product Launch Prep', 'Client Onboarding'), not status labels or sentence fragments. "
     "insights must be an array of short bullets about the most important completed-work takeaways. "
@@ -132,6 +135,7 @@ WEEK_PWP_PENDING_ANALYSIS_PROMPT = (
     "Task descriptions may be prefixed with '⚠ stale | ' or '↩ carryover | ' — strip these prefixes before using the task text. "
     "Group titles must be descriptive business themes of 2-4 words (e.g. 'Platform Roadmap', 'Sales Pipeline'), not status labels or sentence fragments. "
     "next_actions must be an array of short, concrete task-level bullets (e.g. 'Finalize the API auth flow.', 'Deploy the staging environment.') — do NOT use group theme titles as bullets. "
+    "Order next_actions so that the group with the most tasks contributes its bullets first. "
     "blank_pages must be an integer >= 1 describing how many blank continuation slides should follow the next-week page. "
     "Do not invent tasks, metrics, or project names. Do not add markdown or commentary."
 )

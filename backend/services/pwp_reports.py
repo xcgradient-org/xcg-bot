@@ -484,6 +484,19 @@ function renderGroupCard(slide, group, theme, rect, x, y, w, h) {
       fit: "shrink",
     });
   });
+  if (tasks.length > 5) {
+    slide.addText(`… +${tasks.length - 5} more`, {
+      x: x + 0.16,
+      y: taskY + 5 * taskLineHeight,
+      w: w - 0.22,
+      h: taskLineHeight,
+      fontFace: theme.fonts.body,
+      fontSize: 9,
+      color: theme.colors.grayMid,
+      italic: true,
+      margin: 0,
+    });
+  }
   if (group.detail) {
     slide.addText(group.detail, {
       x: x + 0.16,
@@ -1259,16 +1272,18 @@ class WeekPwpReportService:
         if not groups:
             groups = [{"title": "No tasks", "summary": f"No matching tasks were available for {section_name.lower()}.", "tasks": [], "detail": ""}]
         pages: list[dict[str, Any]] = []
+        headline = analysis.get("headline") or section_name
         for index, chunk in enumerate(_split_groups(groups), start=1):
+            title = headline if index == 1 else f"{headline} (cont.)"
             pages.append(
                 {
                     "kind": "section",
-                    "title": analysis.get("headline") or section_name,
-                    "headline": analysis.get("headline") or section_name,
+                    "title": title,
+                    "headline": title,
                     "summary": analysis.get("summary") or "",
                     "groups": chunk,
                     "chart": analysis.get("chart") if index == 1 else None,
-                    "highlights": analysis.get("insights") or [],
+                    "highlights": analysis.get("insights") or [] if index == 1 else [],
                 }
             )
         return pages
