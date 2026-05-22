@@ -133,6 +133,43 @@ def build_api_router(services) -> APIRouter:
         _verify_internal_api_token(request, authorization)
         return {"members": services.runtime.notion.list_team_members()}
 
+    @router.get("/reports/week-pwp/raw")
+    def week_pwp_raw(
+        request: Request,
+        week: int,
+        person: str,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        _verify_internal_api_token(request, authorization)
+        service = WeekPwpReportService(services.runtime)
+        try:
+            return service.get_raw_tasks(week_number=week, person=person)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.get("/reports/week-pwp/scaffold")
+    def week_pwp_scaffold(
+        request: Request,
+        week: int,
+        person: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        _verify_internal_api_token(request, authorization)
+        service = WeekPwpReportService(services.runtime)
+        try:
+            data, filename = service.scaffold_project_zip(week_number=week, person=person)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(
+            content=data,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @router.post("/reports/week-pwp")
     def week_pwp_zip(
         request: Request,

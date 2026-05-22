@@ -1001,6 +1001,73 @@ class WeekPwpReportService:
             pending_count=len(pending_tasks),
         )
 
+    def get_raw_tasks(self, *, week_number: int, person: str) -> dict:
+        """Return raw task lists for a person/week — no LLM, no ZIP."""
+        member_query = str(person or "").strip()
+        if not member_query:
+            raise ValueError("person must be a non-empty name.")
+        if not 1 <= week_number <= 53:
+            raise ValueError("Week must be between 1 and 53.")
+        try:
+            member = self.runtime.notion.find_team_member(member_query)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if not member:
+            raise RuntimeError(f"No active team member found matching {member_query!r}.")
+        role = (member.get("role") or "").strip() or member["name"].strip()
+        founder_name = member["name"]
+        week_code = _resolve_week_code(week_number)
+        all_tasks, done_tasks, pending_tasks = self.runtime.notion.query_week_tasks(
+            role, week_code, founder_name=founder_name
+        )
+        done_descriptions = self.runtime.notion.task_descriptions(done_tasks)
+        pending_descriptions = self.runtime.notion.task_descriptions(pending_tasks)
+        return {
+            "person": founder_name,
+            "week_code": week_code,
+            "role": role,
+            "counts": {"total": len(all_tasks), "done": len(done_tasks), "pending": len(pending_tasks)},
+            "done": done_descriptions,
+            "pending": pending_descriptions,
+        }
+
+    def scaffold_project_zip(self, *, week_number: int, person: str) -> tuple[bytes, str]:
+        """Return a project ZIP with structure but placeholder data.js (no LLM)."""
+        member_query = str(person or "").strip()
+        if not member_query:
+            raise ValueError("person must be a non-empty name.")
+        try:
+            member = self.runtime.notion.find_team_member(member_query)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if not member:
+            raise RuntimeError(f"No active team member found matching {member_query!r}.")
+        role = (member.get("role") or "").strip() or member["name"].strip()
+        founder_name = member["name"]
+        week_code = _resolve_week_code(week_number)
+        project_slug = _slugify(f"week-{week_number:02d}-{founder_name}-{role}-report")
+        plan = {
+            "id": project_slug,
+            "title": f"Week {week_number} report",
+            "subtitle": f"{role} · {founder_name}",
+            "week_code": week_code,
+            "role": role,
+            "founder_name": founder_name,
+            "person_query": person,
+            "counts": {"total": 0, "done": 0, "pending": 0},
+            "pages": [],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            project_dir = base / project_slug
+            self._write_project(project_dir, plan)
+            archive_path = shutil.make_archive(
+                str(base / "bundle"), "zip",
+                root_dir=str(project_dir.parent), base_dir=project_slug,
+            )
+            data = Path(archive_path).read_bytes()
+            return data, f"{project_slug}.zip"
+
     def build_project_zip(
         self,
         *,
