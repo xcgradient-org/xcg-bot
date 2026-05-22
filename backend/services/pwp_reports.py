@@ -884,15 +884,6 @@ def _coerce_chart(payload: dict[str, Any] | None, groups: list[dict[str, Any]], 
         chart_labels = _coerce_list_of_strings(chart.get("labels"))
         if chart_labels:
             labels = chart_labels
-        raw_values = chart.get("values") if isinstance(chart.get("values"), list) else []
-        coerced_values: list[int] = []
-        for value in raw_values[: len(labels)]:
-            try:
-                coerced_values.append(int(value))
-            except Exception:  # noqa: BLE001
-                coerced_values.append(0)
-        if coerced_values:
-            values = coerced_values
     return {
         "title": str(chart.get("title") if isinstance(chart, dict) and chart.get("title") else f"{section_title} balance"),
         "labels": labels,
