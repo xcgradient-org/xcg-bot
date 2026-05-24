@@ -91,6 +91,10 @@ def build_api_router(services) -> APIRouter:
     def parse_meeting(payload: ParseMeetingRequest) -> dict[str, Any]:
         return _service_call(lambda: services.meetings.parse_meeting(payload.model_dump()))
 
+    @router.get("/meetings/types")
+    def list_meeting_types() -> dict[str, Any]:
+        return _service_call(services.meetings.list_meeting_types)
+
     @router.post("/meetings")
     def create_meeting(payload: CreateMeetingRequest) -> dict[str, Any]:
         return _service_call(lambda: services.meetings.create_meeting(payload.model_dump()))

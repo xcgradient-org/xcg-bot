@@ -10,11 +10,15 @@ from pathlib import Path
 import datetime as dt
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
 
 BOT_DIR = Path(__file__).resolve().parents[1]
 if str(BOT_DIR) not in sys.path:
     sys.path.insert(0, str(BOT_DIR))
 
+from backend.api.routes import build_api_router
 from backend import config as main
 from backend.integrations import notion, reflection
 from backend.services.daily_log_dedupe import DailyLogDedupeService
@@ -681,6 +685,48 @@ class InternalMeetingCreatorTests(unittest.TestCase):
         self.assertEqual(week_code, "26-W20")
         self.assertEqual(quarter_name, "Q2 2026")
 
+    def test_list_meeting_types_returns_live_select_options(self) -> None:
+        notion_service = MagicMock()
+        notion_service._retrieve_schema.return_value = {
+            "Type": {
+                "name": "Type",
+                "type": "select",
+                "select": {
+                    "options": [
+                        {"name": "Weekly Sync"},
+                        {"name": "Client"},
+                        {"name": "Administrative"},
+                    ]
+                },
+            }
+        }
+        notion_service._get_schema_property.return_value = notion_service._retrieve_schema.return_value["Type"]
+        runtime = MagicMock(notion=notion_service, meetings_db_id="meetings-db")
+
+        result = MeetingsService(runtime).list_meeting_types()
+
+        notion_service._retrieve_schema.assert_called_once_with("meetings-db")
+        notion_service._get_schema_property.assert_called_once_with(
+            notion_service._retrieve_schema.return_value,
+            "Type",
+        )
+        self.assertEqual(result, {"types": ["Weekly Sync", "Client", "Administrative"]})
+
+    def test_list_meeting_types_rejects_non_select_type_property(self) -> None:
+        notion_service = MagicMock()
+        notion_service._retrieve_schema.return_value = {
+            "Type": {
+                "name": "Type",
+                "type": "status",
+                "status": {"options": [{"name": "Pending"}]},
+            }
+        }
+        notion_service._get_schema_property.return_value = notion_service._retrieve_schema.return_value["Type"]
+        runtime = MagicMock(notion=notion_service, meetings_db_id="meetings-db")
+
+        with self.assertRaisesRegex(RuntimeError, "must be a select field"):
+            MeetingsService(runtime).list_meeting_types()
+
     def test_create_meeting_attendance_tasks_creates_one_task_per_attendee(self) -> None:
         app = internal_server.InternalNotionApp.__new__(internal_server.InternalNotionApp)
         app.meeting_task_project_id = ""
@@ -762,6 +808,35 @@ class InternalTaskServiceTests(unittest.TestCase):
         create_call = notion_service.create_tasks_batch.call_args.kwargs
         self.assertTrue(create_call["is_current_week"])
         self.assertEqual(result["created"], 1)
+
+
+class MeetingApiRouteTests(unittest.TestCase):
+    def test_list_meeting_types_route_returns_service_payload(self) -> None:
+        services = MagicMock()
+        services.meetings.list_meeting_types.return_value = {
+            "types": ["Weekly Sync", "Client", "Administrative"]
+        }
+        app = FastAPI()
+        app.include_router(build_api_router(services))
+
+        response = TestClient(app).get("/api/meetings/types")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"types": ["Weekly Sync", "Client", "Administrative"]},
+        )
+
+    def test_list_meeting_types_route_surfaces_runtime_errors(self) -> None:
+        services = MagicMock()
+        services.meetings.list_meeting_types.side_effect = RuntimeError("Meetings database is missing a Type property.")
+        app = FastAPI()
+        app.include_router(build_api_router(services))
+
+        response = TestClient(app).get("/api/meetings/types")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.json(), {"detail": "Meetings database is missing a Type property."})
 
 
 class NotionTaskCreationTests(unittest.TestCase):

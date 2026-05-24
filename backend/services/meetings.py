@@ -18,6 +18,23 @@ class MeetingsService:
     def __init__(self, runtime) -> None:
         self.runtime = runtime
 
+    def list_meeting_types(self) -> dict[str, list[str]]:
+        schema = self.runtime.notion._retrieve_schema(self.runtime.meetings_db_id)
+        prop = self.runtime.notion._get_schema_property(schema, "Type")
+        if not prop:
+            raise RuntimeError("Meetings database is missing a Type property.")
+        if prop.get("type") != "select":
+            raise RuntimeError("Meetings Type property must be a select field.")
+
+        options = [
+            str(option.get("name") or "").strip()
+            for option in (prop.get("select") or {}).get("options", [])
+        ]
+        types = [option for option in options if option]
+        if not types:
+            raise RuntimeError("Meetings Type property does not expose any options.")
+        return {"types": types}
+
     def parse_meeting(self, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         raw_input = {
             "title": payload.get("title"),

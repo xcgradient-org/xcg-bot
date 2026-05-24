@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { postJson } from "../lib/api.js";
+import { apiJson, postJson } from "../lib/api.js";
 import AppHeader from "../components/AppHeader.jsx";
 import AppFooter from "../components/AppFooter.jsx";
 import LoadingDots from "../components/LoadingDots.jsx";
@@ -9,7 +9,6 @@ const founders = [
   { id: "arnau", name: "Arnau", role: "CTO", avatar: "AR" },
   { id: "adam", name: "Adam", role: "COO", avatar: "AD" },
 ];
-const meetingTypes = ["Weekly Sync", "Client", "Investor", "Other"];
 
 function weekCode(date = new Date()) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -22,18 +21,19 @@ function weekCode(date = new Date()) {
 
 function titleSuggestion(type) {
   if (type === "Weekly Sync") return `Weekly Sync - ${weekCode()}`;
-  if (type === "Client") return "Client Meeting";
-  if (type === "Investor") return "Investor Meeting";
-  return "Meeting";
+  return type || "Meeting";
 }
 
 export default function MeetingCreator() {
   useEffect(() => { document.title = "XC Gradient — Meeting Creator"; }, []);
   const [phase, setPhase] = useState(1);
   const [owners, setOwners] = useState([]);
-  const [type, setType] = useState("Weekly Sync");
+  const [meetingTypes, setMeetingTypes] = useState([]);
+  const [typesLoading, setTypesLoading] = useState(true);
+  const [typesError, setTypesError] = useState("");
+  const [type, setType] = useState("");
   const [mode, setMode] = useState("online");
-  const [title, setTitle] = useState(titleSuggestion("Weekly Sync"));
+  const [title, setTitle] = useState(titleSuggestion(""));
   const [dateInput, setDateInput] = useState("");
   const [notes, setNotes] = useState("");
   const [meetingLink, setMeetingLink] = useState("");
@@ -44,15 +44,46 @@ export default function MeetingCreator() {
   const [busy, setBusy] = useState(false);
   const [online, setOnline] = useState(true);
 
+  const defaultType = meetingTypes[0] || "";
   const selectedAttendees = owners.map((owner) => owner.role);
   const primaryOwner = owners[0] || null;
-  const canContinue = owners.length > 0 && type && mode;
+  const canContinue = owners.length > 0 && type && mode && !typesLoading && meetingTypes.length > 0;
   const canParse = Boolean(primaryOwner && title.trim() && dateInput.trim() && (mode === "online" ? meetingLink.trim() : address.trim()));
   const target = useMemo(() => parsed?.date_label || dateInput || "Unscheduled", [parsed, dateInput]);
+
+  useEffect(() => {
+    loadMeetingTypes();
+  }, []);
 
   function changeType(nextType) {
     setType(nextType);
     setTitle(titleSuggestion(nextType));
+  }
+
+  async function loadMeetingTypes() {
+    setTypesLoading(true);
+    setTypesError("");
+    try {
+      const payload = await apiJson("/api/meetings/types", { timeoutMs: 12000 });
+      const nextTypes = Array.isArray(payload.types)
+        ? payload.types.map((item) => String(item || "").trim()).filter(Boolean)
+        : [];
+      if (!nextTypes.length) {
+        throw new Error("No meeting types returned from Notion.");
+      }
+      const nextType = nextTypes.includes(type) && type ? type : nextTypes[0];
+      setMeetingTypes(nextTypes);
+      setType(nextType);
+      if (!type || !nextTypes.includes(type)) {
+        setTitle(titleSuggestion(nextType));
+      }
+      setOnline(true);
+    } catch (exc) {
+      setOnline(false);
+      setTypesError(exc.message || "Could not load meeting types.");
+    } finally {
+      setTypesLoading(false);
+    }
   }
 
   function toggleOwner(owner) {
@@ -115,9 +146,9 @@ export default function MeetingCreator() {
   function startOver() {
     setPhase(1);
     setOwners([]);
-    setType("Weekly Sync");
+    setType(defaultType);
     setMode("online");
-    setTitle(titleSuggestion("Weekly Sync"));
+    setTitle(titleSuggestion(defaultType));
     setDateInput("");
     setNotes("");
     setMeetingLink("");
@@ -170,11 +201,22 @@ export default function MeetingCreator() {
 
           <div className="field">
             <div className="field-label"><span className="name">Type</span><span className="req">required</span></div>
-            <div className="seg">
-              {meetingTypes.map((item) => (
-                <button className={type === item ? "is-active" : ""} type="button" key={item} onClick={() => changeType(item)}>{item}</button>
-              ))}
-            </div>
+            {typesLoading ? (
+              <div className="seg" aria-live="polite">
+                <button className="is-active" type="button" disabled>Loading <LoadingDots /></button>
+              </div>
+            ) : typesError ? (
+              <div className="inline-error">
+                {typesError}
+                <button className="btn btn-secondary" type="button" onClick={loadMeetingTypes}>Retry</button>
+              </div>
+            ) : (
+              <div className="seg">
+                {meetingTypes.map((item) => (
+                  <button className={type === item ? "is-active" : ""} type="button" key={item} onClick={() => changeType(item)}>{item}</button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="field">
