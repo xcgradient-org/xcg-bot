@@ -32,9 +32,12 @@ export default function LegacyToolPage({ html, title, subtitle }) {
       rootRef.current.innerHTML = pieces.body;
     }
 
+    // Scripts are build-time ?raw imports (never user input); script-element
+    // injection is the standard DOM pattern and avoids new Function / eval.
     try {
-      const run = new Function(pieces.script);
-      run();
+      const scriptEl = document.createElement("script");
+      scriptEl.textContent = pieces.script;
+      rootRef.current.appendChild(scriptEl);
     } finally {
       document.addEventListener = originalDocumentAdd;
     }

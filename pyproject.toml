@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "discord.py>=2.3",
     "fastapi",
+    "httpx",
     "notion-client",
     "python-dotenv",
     "pytz",
